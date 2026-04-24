@@ -13,17 +13,17 @@ Every step includes who owns it, what done looks like, and whether it is a block
 | Core automation code | ✅ Complete, on `devlop` branch |
 | Offline tests (18/18) | ✅ Passing |
 | Dry-run against real APIs (local) | ✅ Done 2026-04-15 — 35 states, 5 adsets |
-| GitHub Secrets | ⚠️ Not configured |
-| IP whitelist for GitHub Actions | ⚠️ Unresolved — main blocker |
-| Mike confirmation of dry-run output | ⚠️ Pending |
-| `devlop` → `main` merge | ⚠️ Pending |
-| First live cron run | ⚠️ Pending |
+| GitHub Secrets | ✅ Configured 2026-04-20 |
+| IP whitelist for GitHub Actions | ✅ Resolved — main blocker |
+| Mike confirmation of dry-run output | ✅ Cofirmed |
+| `devlop` → `main` merge | ✅ Done 2026-04-19 |
+| First live cron run | ✅ Done 2026-04-21 |
 
 ---
 
 ## Step 1 — Mike confirms the dry-run state list
 
-**Owner:** Juanes | **Blocker for:** Step 4 (live run) | **Status:** ⚠️ Pending
+**Owner:** Juanes | **Blocker for:** Step 4 (live run) | **Status:** ✅ Approved
 
 Share the dry-run output with Mike and ask him to confirm that the 35 active states are correct:
 
@@ -37,7 +37,7 @@ If Mike says these are wrong, there is a bug in how CLOSRTECH is being queried (
 
 ## Step 2 — Resolve the IP whitelist
 
-**Owner:** Juanes (decision) + Nat (implementation) | **Blocker for:** Steps 3 and 5 | **Status:** ⚠️ Unresolved
+**Owner:** Juanes (decision) + Nat (implementation) | **Blocker for:** Steps 3 and 5 | **Status:** ✅ Resolved
 
 Choose one of the options documented in [`github-actions.md`](./github-actions.md):
 
@@ -51,12 +51,13 @@ Choose one of the options documented in [`github-actions.md`](./github-actions.m
 Once decided, implement the chosen solution and verify that a `curl` or `python` call to `demand.php` from the target execution environment succeeds.
 
 **Done when:** A test HTTP request to `demand.php` from the chosen runner/environment returns a valid JSON response (not 403).
+**Chosen solution**: We are going to use an EC2 instance but in the meantime, we are going to use Self-hosted Github Actions runner with Nheo's server
 
 ---
 
 ## Step 3 — Configure GitHub Secrets
 
-**Owner:** Juanes or Nat | **Blocker for:** Step 5 (merge + cron) | **Status:** ⚠️ Not configured
+**Owner:** Juanes or Nat | **Blocker for:** Step 5 (merge + cron) | **Status:** ✅ Configured
 
 In the GitHub repo: Settings → Secrets and variables → Actions → New repository secret.
 
@@ -78,7 +79,7 @@ In the GitHub repo: Settings → Secrets and variables → Actions → New repos
 
 ## Step 4 — Manual `workflow_dispatch` dry-run from GitHub Actions
 
-**Owner:** Nat | **Blocker for:** Step 5 (merge) | **Status:** ⚠️ Pending Steps 2 and 3
+**Owner:** Nat | **Blocker for:** Step 5 (merge) | **Status:** ✅ Done 2026-04-21
 
 Once the IP issue is resolved and secrets are configured, trigger the workflow manually from GitHub Actions UI with `dry_run: true`.
 
@@ -98,7 +99,7 @@ If the run fails, diagnose from the workflow log. Common failure points at this 
 
 ## Step 5 — Merge `devlop` → `main`
 
-**Owner:** Juanes | **Blocker for:** Step 6 (first live cron) | **Status:** ⚠️ Pending Step 4
+**Owner:** Juanes | **Blocker for:** Step 6 (first live cron) | **Status:** ✅ Done
 
 Create a PR from `devlop` to `main`. Review the diff — it should be the entire CLOSRADS codebase since `main` is currently empty or stale.
 
@@ -108,9 +109,9 @@ Merge only after Step 4 passes. The cron workflow is configured to run from `mai
 
 ---
 
-## Step 6 — First live cron run (DRY_RUN=false)
+## Step 6 — First live cron run (DRY_RUN=false) 
 
-**Owner:** Nat (monitor), Juanes (sign-off) | **Blocker for:** Nothing — this is the finish line | **Status:** ⚠️ Pending Step 5
+**Owner:** Nat (monitor), Juanes (sign-off) | **Blocker for:** Nothing — this is the finish line | **Status:** ✅ Done 2026-04-21
 
 The day after the merge to `main`, the cron fires at 13:00 UTC (8 AM Colombia) with `DRY_RUN=false`.
 
@@ -152,3 +153,40 @@ Once live, the automation should be monitored for the first 5 days:
 - After 5 successful days, consider the automation stable and reduce monitoring to weekly spot-checks
 
 **Long-term:** The System User token does not expire, so no credential rotation is expected. The only maintenance scenario is if Meta changes the `facebook-business` SDK (update `requirements.txt`) or if CLOSRTECH changes their API contract (update `closrtech_client.py`).
+
+# Multi-Campaign Support Adaptation
+_Context_
+The original implementation was designed to sync a single campaign (Veteran) between CLOSRTECH and Facebook Ads. The scope was expanded to support 4 campaigns across 2 Facebook Ad Accounts:
+
+Veteran (original)
+Trucker (new)
+Morgage MP (new)
+Morgage MP2 (new)
+
+### Changes by file:
+- **closrtech_client.py**:
+  get_demand() now accepts a campaign: str parameter instead of reading config.CLOSRTECH_CAMPAIGN directly. This allows each campaign to query its own CLOSRTECH demand independently.
+
+- **facebook_client.py**:
+  No changes required. The existing FB token has access to both ad accounts, so get_active_adsets(campaign_id) works across accounts without         modification.
+
+- **sync.py**:
+  - Added campaign_mapping dict that pairs each FB_CAMPAIGN_ID with its corresponding CLOSRTECH_CAMPAIGN identifier.
+  - init_api() moved outside the loop — called once since the token is shared.
+  - The main loop now iterates over campaign_mapping.items(), unpacking both IDs per iteration.
+  - A fresh SyncReport is instantiated at the start of each campaign iteration, giving an independent report per campaign.
+  - All error handlers use continue instead of return so a failure in one campaign does not abort the others. The failed report is still appended to preserve the record.
+  - run_sync() return type changed from SyncReport to list[SyncReport].
+
+- **main.py and notifier.py**: Pending update, is currently expecting a SyncReport but with the changes made, we are returning a list of SyncReports.
+
+### GitHub Actions workflow
+- Added secrets for all 4 campaign IDs: FB_CAMPAIGN_ID_V, FB_CAMPAIGN_ID_T, FB_CAMPAIGN_ID_MP, FB_CAMPAIGN_ID_MP2.
+- Added CLOSRTECH campaign secrets: CLOSRTECH_CAMPAIGN_VETERAN, CLOSRTECH_CAMPAIGN_TRUCKER, CLOSRTECH_CAMPAIGN_MORGAGE.
+- Added both facebook account IDs but are nor currently being used because the token is said to be enough.
+- The rest of secrets were kept the same (CLOSRTECH_EMAIL, CLOSRTECH_PASSWORD, FB_ACCESS_TOKEN)
+
+
+### Known current issues
+1. CLOSRTECH_CAMPAIGN_MORGAGE (MP and MP2) returns HTTP 403 "No access to this campaign" — the credentials provided may not have access to these campaign IDs yet.
+2. main.py and notifier.py crash with AttributeError: 'list' object has no attribute 'dry_run' because they have not yet been updated to handle list[SyncReport].  
