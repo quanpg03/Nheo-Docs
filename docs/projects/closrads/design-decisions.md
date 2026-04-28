@@ -166,3 +166,15 @@ Every significant design decision made during the build of CLOSRADS — what was
 **How it works:** `_sync_campaign()` iterates over `campaign.fb_campaign_ids`, calls `get_active_adsets()` for each, and combines all adsets into one list before applying the demand. The result is one `SyncReport` for Mortgage with the combined adset count from both Facebook campaigns.
 
 **Config:** `MORTGAGE_FB_CAMPAIGN_IDS` (plural) stores the two IDs as a comma-separated string. The `_load_campaign()` helper detects whether to read `{PREFIX}_FB_CAMPAIGN_ID` (singular) or `{PREFIX}_FB_CAMPAIGN_IDS` (plural, split on comma).
+
+---
+
+## D13 — Sync frequency: hourly cron instead of event-driven execution
+
+**Decision**: The workflow runs on a fixed hourly cron schedule rather than being triggered by demand-change events.
+
+**Alternatives**: Switch to an event-driven model that fires the sync only when a change in demand is detected (as requested by the client).
+
+**Reasoning**: Event-driven execution would require a separate layer to detect demand changes, adding significant complexity for little practical gain. An hourly cron is simple, cheap to run, and already gives near-real-time responsiveness — demand changes are picked up within 60 minutes at most, which covers the client's concern.
+
+**Config**: The cron expression moves from 0 8 * * * (once daily) to 0 * * * * (at the start of every hour). No other scheduling logic changes.
