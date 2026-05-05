@@ -4,7 +4,7 @@
 
 ## Overview
 
-CLOSRADS has 18 unit tests across two test files. All 18 pass. The test suite is entirely **offline** — it never calls CLOSRTECH, Facebook, or Slack. This is a deliberate design choice, not a limitation: tests that depend on external APIs are slow, flaky, and stop working when credentials rotate or APIs change.
+CLOSRADS has 18 unit tests across two test files. All 18 pass — including after the multi-campaign refactor (no test logic changes required). The test suite is entirely **offline** — it never calls CLOSRTECH, Facebook, or Slack.
 
 **Run command:**
 ```bash
@@ -21,15 +21,34 @@ pytest tests/ -v
 
 The most important testing infrastructure decision is `tests/conftest.py`. It runs before any test module is imported and **injects stub environment variables** into `os.environ`.
 
-This is necessary because `src/config.py` calls `_require()` at import time. If you import any `src/` module in a test without the env vars present, Python raises `ValueError: Missing required env var: FB_ACCESS_TOKEN` before the test even runs.
+This is necessary because `src/config.py` calls `_require()` at import time. If you import any `src/` module in a test without the env vars present, Python raises `ValueError: Missing required env var` before the test even runs.
+
+After the multi-campaign refactor, `conftest.py` uses the per-campaign naming convention:
 
 ```python
+import os
+
+# Shared credentials
 os.environ.setdefault('CLOSRTECH_EMAIL', 'test@example.com')
 os.environ.setdefault('CLOSRTECH_PASSWORD', 'test_password')
-os.environ.setdefault('CLOSRTECH_CAMPAIGN', 'TEST_CAMPAIGN')
-os.environ.setdefault('FB_ACCESS_TOKEN', 'fake_token_123')
-os.environ.setdefault('FB_AD_ACCOUNT_ID', 'act_123456789')
-os.environ.setdefault('FB_CAMPAIGN_ID', '987654321')
+
+# Veterans
+os.environ.setdefault('VETERANS_CLOSRTECH_CAMPAIGN', 'VND_VETERAN_LEADS')
+os.environ.setdefault('VETERANS_FB_ACCESS_TOKEN', 'fake_token_veterans')
+os.environ.setdefault('VETERANS_FB_AD_ACCOUNT_ID', 'act_996226848340777')
+os.environ.setdefault('VETERANS_FB_CAMPAIGN_ID', '120238960603460363')
+
+# Truckers
+os.environ.setdefault('TRUCKERS_CLOSRTECH_CAMPAIGN', 'VND_TRUCKER_LEADS')
+os.environ.setdefault('TRUCKERS_FB_ACCESS_TOKEN', 'fake_token_truckers')
+os.environ.setdefault('TRUCKERS_FB_AD_ACCOUNT_ID', 'act_996226848340777')
+os.environ.setdefault('TRUCKERS_FB_CAMPAIGN_ID', '120239404121750363')
+
+# Mortgage (two campaign IDs, comma-separated)
+os.environ.setdefault('MORTGAGE_CLOSRTECH_CAMPAIGN', 'VND_MORTGAGE_PROTECTION_LEADS')
+os.environ.setdefault('MORTGAGE_FB_ACCESS_TOKEN', 'fake_token_mortgage')
+os.environ.setdefault('MORTGAGE_FB_AD_ACCOUNT_ID', 'act_1007012848173879')
+os.environ.setdefault('MORTGAGE_FB_CAMPAIGN_IDS', '120245305494410017,120241447971000017')
 ```
 
 Using `setdefault` (not `os.environ[key] = ...`) means that if a real `.env` file is loaded first, the real values take precedence.
@@ -57,7 +76,7 @@ Tests the USPS → Facebook region key translation logic in `state_mapper.py`.
 | `test_build_fb_regions_all_unknown` | All-unknown states returns empty list (sync.py catches this) |
 | `test_mapping_cache_used` | After the first call, subsequent calls read from memory, not disk (verifies `_MAPPING` cache) |
 
-**Why these tests matter:** The mapping file is static but it's the only source of truth for state-to-key translation. A silent bug here (wrong key for a state) would mean Facebook gets incorrect region IDs and targets the wrong state.
+**Why these tests matter:** The mapping file is static but it's the only source of truth for state-to-key translation. A silent bug here (wrong key for a state) would mean Facebook gets incorrect region IDs and targets the wrong state — across all three campaigns.
 
 ### `tests/test_sync_logic.py` — 10 tests
 
@@ -71,7 +90,7 @@ Tests the orchestration logic in `sync.py` and the Facebook targeting logic in `
 | `test_all_zeros_failsafe` | If CLOSRTECH returns all demand=0, sync raises `ClosrtechDataError` and Facebook is never touched |
 | `test_empty_regions_abort` | If `build_fb_regions` returns empty list, sync aborts before calling Facebook |
 | `test_per_adset_error_isolation` | If one adset fails, the others are still updated; error appears in `report.errors` |
-| `test_sync_report_fields` | `SyncReport` fields (`adsets_processed`, `adsets_updated`, `adsets_skipped`, `errors`, `success`) are correctly populated |
+| `test_sync_report_fields` | `SyncReport` fields (`campaign_name`, `adsets_processed`, `adsets_updated`, `adsets_skipped`, `errors`, `success`) are correctly populated |
 | `test_deepcopy_preserves_other_targeting` | After update, only `geo_locations.regions` changed; all other targeting fields identical to original |
 | `test_dry_run_does_not_call_update_api` | With `DRY_RUN=True`, the Facebook update API is never called even when targeting differs |
 | `test_closrtech_retry_on_network_error` | Network error triggers retry up to 3 times before raising `ClosrtechError` |
@@ -86,12 +105,13 @@ Tests the orchestration logic in `sync.py` and the Facebook targeting logic in `
 |-----|--------|------------|
 | Real CLOSRTECH API call | Requires credentials + IP whitelist; tested manually during dry-run | Low (tested manually) |
 | Real Facebook Graph API call | Requires credentials; tested manually during dry-run | Low (tested manually) |
+| Multi-campaign loop in `run_sync()` | Current tests mock at the `_sync_campaign` level; loop behavior is simple iteration | Low |
 | `notifier.py` Slack delivery | Would require a real or mock HTTP server; stdout path is implicitly exercised | Low (Slack failure is non-blocking) |
 | `main.py` exit codes | Not unit tested; covered by integration test if/when added | Low (2-line function) |
 | GitHub Actions workflow YAML syntax | Not validated by pytest; caught by GitHub on push | Low (syntax errors are obvious) |
 | Token expiration handling | System User tokens don't expire; not a realistic scenario | Low |
 
-The most meaningful untested path is the full end-to-end run from GitHub Actions against both real APIs. That requires the IP whitelist issue to be resolved first. Once it is, a manual `workflow_dispatch` run with `DRY_RUN=true` should be the integration test.
+The most meaningful untested path is the full end-to-end run from GitHub Actions against both real APIs for all three campaigns. That requires the IP whitelist issue and the new System User token to be resolved first. Once both are ready, a manual `workflow_dispatch` run with `DRY_RUN=true` should be the integration test.
 
 ---
 
