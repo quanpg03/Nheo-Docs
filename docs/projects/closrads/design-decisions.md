@@ -1,180 +1,162 @@
 # Design Decisions
 
-Every significant design decision made during the build of CLOSRADS — what was chosen, what the alternatives were, and why the chosen approach was better for this specific context. Ordered from highest-stakes to lowest-stakes.
+Every significant design decision made during the build of CLOSRADS — what was chosen, what the alternatives were, and why. Ordered from highest-stakes to lowest-stakes.
 
 ---
 
 ## D01 — DRY_RUN defaults to `true`
 
-**Decision:** `config.py` parses `DRY_RUN` from the environment and defaults to `True` if the variable is absent or empty. The GitHub Actions workflow sets `DRY_RUN=false` only for the scheduled cron. Manual triggers default to `true`.
+**Decision:** `config.py` defaults `DRY_RUN` to `True` if the variable is absent. The GitHub Actions workflow sets `DRY_RUN=false` only for the scheduled cron. Manual triggers default to `true`.
 
-**Alternatives:** Default to `false` (live mode) and require explicit opt-in to dry-run.
+**Reasoning:** Any automation that writes to an external system should be safe to run accidentally. The alternative inverts the risk: a misconfigured run in live mode could update all adsets with wrong targeting. With real Facebook Ads budget at stake, there is no undo.
 
-**Reasoning:** Any automation that writes to an external system should be safe to run accidentally. If a developer clones the repo, creates a `.env`, and runs `python main.py` without setting `DRY_RUN=false`, nothing happens to Facebook. The alternative inverts the risk: a misconfigured run in live mode could update all adsets with wrong targeting before anyone notices.
-
-**Why this matters more for this project specifically:** The script touches live Facebook Ads that are actively spending Mike's budget. There is no undo for a targeting update — any bad state persists until the next run corrects it.
-
-**Documented behavior:**
-
-- `DRY_RUN` absent → `True`
-- `DRY_RUN=true`, `DRY_RUN=1`, `DRY_RUN=yes` (case-insensitive) → `True`
-- `DRY_RUN=false`, `DRY_RUN=0`, `DRY_RUN=no` → `False`
-- `config.py` logs a prominent `WARNING: DRY RUN MODE — no changes will be made to Facebook` at startup when `True`
+**Documented behavior:** `DRY_RUN` absent or empty → `True`. `true`/`1`/`yes` (case-insensitive) → `True`. `false`/`0`/`no` → `False`. Startup logs a prominent warning when `True`.
 
 ---
 
 ## D02 — All-zeros fail-safe in `closrtech_client.py`
 
-**Decision:** If CLOSRTECH returns a non-empty response where every state has `demand == 0`, the script raises `ClosrtechDataError` and aborts. Facebook is never touched.
+**Decision:** If CLOSRTECH returns a non-empty response where every state has `demand == 0`, raise `ClosrtechDataError` and abort. Facebook is never touched.
 
-**Alternatives:** Trust the data and apply it as-is.
+**Reasoning:** Zero demand for all states is almost certainly a data error on CLOSRTECH’s side, not a legitimate instruction. Applying it would update every adset to have empty geographic targeting — pausing all coverage for the day due to a third-party bug.
 
-**Reasoning:** Zero demand for all states is almost certainly a data error on CLOSRTECH's side (API bug, empty database query, malformed response), not a legitimate instruction to stop advertising everywhere. If the script honored an all-zeros response, it would update every Facebook adset to have empty geographic targeting — causing Mike to lose a full day of lead generation due to a third-party bug.
-
-**The boundary condition:** The fail-safe triggers when the response is non-empty AND all values are zero. An empty response (`{}`) is also an abort, but via a different code path.
-
-**What happens when it triggers:** `run_sync()` receives `ClosrtechDataError`, propagates it to `main.py`, which logs the error and exits with code 1. GitHub Actions marks the run failed, sends a failure email, and `notifier.py` sends a Slack alert.
+**Boundary condition:** Non-empty response with all zeros triggers the fail-safe. Empty response (`{}`) is a separate abort path. Both paths prevent writing zero states to Facebook.
 
 ---
 
 ## D03 — `deepcopy` targeting before modifying
 
-**Decision:** `facebook_client._build_new_targeting()` creates a `copy.deepcopy()` of the current targeting object before replacing `geo_locations.regions`. The deep copy is what gets sent to the Facebook API, not a mutation of the original.
+**Decision:** `_build_new_targeting()` makes a `copy.deepcopy()` before replacing `geo_locations.regions`.
 
-**Alternatives:** Construct the targeting update from scratch, only sending the geo fields.
+**Reasoning:** Sending a partial targeting update to Facebook replaces the entire targeting object — wiping out interests, age ranges, genders, and other fields. The deepcopy preserves all fields except the one being changed.
 
-**Reasoning:** Facebook adset targeting is a deeply nested dict with many fields: age min/max, genders, interests, behaviors, publisher platforms, location types, device platforms, and more. CLOSRADS only manages geographic targeting. A partial update would cause Facebook to interpret the missing fields as deletions — wiping out targeting configured by Mike's team in Ads Manager.
-
-**Deep copy (not shallow copy) is required** because `geo_locations` is a nested dict. A shallow copy would still share the reference to `geo_locations`, and modifying `regions` would mutate the original object, making the idempotency check unreliable.
-
-**This decision is tested explicitly:** `test_deepcopy_preserves_other_targeting` in `test_sync_logic.py` verifies that after a targeting update, every field other than `geo_locations.regions` is identical to the original.
+**Why deepcopy not shallow:** `geo_locations` is a nested dict. Shallow copy still shares the reference, making the idempotency check unreliable.
 
 ---
 
 ## D04 — Idempotency check before every write
 
-**Decision:** Before calling the Facebook update API for any adset, `update_adset_geo()` compares `current_keys` (set of region keys currently on the adset) to `desired_keys` (set of region keys derived from CLOSRTECH demand). If they are equal, no API call is made.
+**Decision:** Compare current vs desired region key sets before calling the Facebook update API. If equal, skip.
 
-**Alternatives:** Always update, regardless of whether the value is different.
+**Reasoning:** On most days, demand is stable. Updating to the same value wastes API quota, adds risk of transient errors, and pollutes Facebook’s change history for the adset.
 
-**Reasoning:** On most days, CLOSRTECH demand doesn't change dramatically overnight. Updating targeting to the same value it already has is wasted API quota, introduces unnecessary risk of a transient API error, and adds noise to Facebook's change history for the adset.
-
-**How idempotency is measured:** The comparison uses Python sets of region key strings (`{"3878", "3890", ...}`), not the full region objects. Two objects with the same `key` but different `name` formatting compare as equal by key — which is the correct behavior since Facebook identifies regions by key, not by name.
-
-**SyncReport reflects this:** `adsets_skipped` counts adsets that passed the idempotency check. On a typical day with stable demand, expect `adsets_skipped` to be high and `adsets_updated` to be low.
+**Measurement:** Sets of region key strings, not full objects. Two objects with the same `key` but different `name` formatting compare as equal — correct, since Facebook identifies regions by key.
 
 ---
 
 ## D05 — No credentials in code or git history
 
-**Decision:** All credentials are loaded exclusively from environment variables. No credential appears as a default value, a fallback string, or a comment in any source file. The `.env` file is in `.gitignore`.
+**Decision:** All credentials load exclusively from environment variables. No fallbacks, no defaults, no comments containing real values.
 
-**Alternatives:** `.env` file committed to repo, hardcoded for testing.
+**Reasoning:** A credential committed to a git repo is permanently compromised. A leaked System User token gives full programmatic control over Mike’s entire ad account.
 
-**Reasoning:** A credential committed to a git repo is permanently compromised — even if removed in a later commit, it remains in the git history. For Facebook tokens, a leaked System User token gives full programmatic control over Mike's entire ad account.
-
-**How this is enforced:** `config.py`'s `_require()` function raises `ValueError` if a variable is absent or empty. There is no fallback value for any required credential.
-
-**The `fb_region_keys.json` exception:** This file is committed to the repo and contains Facebook region IDs. These are not credentials — they are public API identifiers that anyone can look up via the Graph API. Committing them is correct.
+**Enforcement:** `_require()` raises `ValueError` if absent or empty. `fb_region_keys.json` is an exception — it contains public API IDs, not credentials.
 
 ---
 
-## D06 — Separate module per responsibility, no shared client
+## D06 — Separate module per responsibility
 
-**Decision:** `closrtech_client.py` and `facebook_client.py` are completely separate modules. Neither imports from the other. `sync.py` is the only module that knows about both.
+**Decision:** `closrtech_client.py` and `facebook_client.py` are completely separate. Neither imports the other. `sync.py` is the only module that knows both.
 
-**Alternatives:** Single `api_client.py`, or two modules where one calls the other.
-
-**Reasoning:** The two APIs have nothing in common except that they are both called in sequence during a sync. Separating them means a CLOSRTECH API contract change only touches `closrtech_client.py`, and a Facebook SDK version update only touches `facebook_client.py`.
-
-**The translation layer:** `state_mapper.py` exists specifically because neither client should know about the other's format. Putting the translation in either client would create an implicit coupling.
+**Reasoning:** A CLOSRTECH API change only touches `closrtech_client.py`. A Facebook SDK update only touches `facebook_client.py`. `state_mapper.py` isolates the format translation so neither client needs to know about the other’s format.
 
 ---
 
-## D07 — `tenacity` for retries, not manual retry loops
+## D07 — `tenacity` for retries
 
-**Decision:** Retry logic for both CLOSRTECH and Facebook API calls uses the `tenacity` library with `@retry` decorators.
+**Decision:** Retry logic uses `tenacity` with `@retry` decorators, not manual loops.
 
-**Alternatives:** Manual `for` loops with `time.sleep()`.
+**Reasoning:** Manual retry loops are verbose and easy to get wrong. `tenacity` reads as a specification. Exponential backoff (4s/8s/16s for CLOSRTECH, 5s/10s/20s for Facebook) gives overloaded APIs time to recover.
 
-**Reasoning:** Manual retry loops are verbose, easy to get wrong (off-by-one on attempts, forgetting to re-raise after max retries), and hard to test. `tenacity` provides a declarative interface.
-
-**Exponential backoff rationale:** Flat retries hammer an API that may be temporarily overloaded. Exponential backoff (4s, 8s, 16s for CLOSRTECH; 5s, 10s, 20s for Facebook) gives the API time to recover. Facebook's Graph API has stricter rate limiting and recovers more slowly, hence the slightly longer waits.
-
-**What is retried vs not:** `ClosrtechError` (network/HTTP failures) is retried. `ClosrtechDataError` (bad data — all zeros, invalid JSON) is not retried. Retrying bad data is pointless and wastes time.
+**Retry scope:** `ClosrtechError` (network failures) is retried. `ClosrtechDataError` (bad data) is not — retrying won’t fix it.
 
 ---
 
 ## D08 — `fb_region_keys.json` generated once and committed
 
-**Decision:** The USPS-to-Facebook-region-key mapping was generated once via `scripts/fetch_fb_region_keys.py` and committed to the repo as `data/fb_region_keys.json`. It is not regenerated on every run.
+**Decision:** The USPS-to-Facebook-region-key mapping is generated once and committed. Not regenerated on every run.
 
-**Alternatives:** Regenerate on every run via API call, or hardcode in Python.
+**Reasoning:** 51 API calls per run, 5–10 seconds of extra latency, and a new failure point — for data that hasn’t changed in years. The file is small, public, and auditable.
 
-**Reasoning:** Facebook's internal region IDs for US states are stable. Regenerating on every run would cost 51 API calls per execution, add 5–10 seconds of latency, and introduce a failure point. The same mapping file is used unchanged for all three campaigns.
-
-**When to regenerate:** Only if Meta announces a change to their region ID system (historically very rare).
-
-**The DC edge case:** Facebook stores Washington D.C. as `"Washington D. C."` (with spaces around the period). Any future regeneration should verify this name is still correct.
+**DC edge case:** Facebook stores DC as `"Washington D. C."` (spaces around the period). Any regeneration must verify this.
 
 ---
 
 ## D09 — System User token over regular user token
 
-**Decision:** The `FB_ACCESS_TOKEN` used by the script must be a Meta Business System User token, not a personal user access token.
+**Decision:** The FB access token must be a Meta Business System User token, not a personal user token.
 
-**Alternatives:** A long-lived user token (60-day expiry) with a renewal workflow.
+**Reasoning:** Personal user tokens expire after 60 days and are tied to individual login sessions. System User tokens belong to the business and never expire.
 
-**Reasoning:** Regular user access tokens expire after 60 days. A cron job that runs every day would need token rotation logic — if the rotation fails or is forgotten, the automation breaks silently. System User tokens are non-expiring.
-
-**This was validated the hard way:** The token originally used was a personal session token tied to Mike's account. When that session expired on April 21, 2026, the automation failed for all three campaigns simultaneously. The correct System User (CLOSRADS) already existed in the Meta Business Manager and had access to both ad accounts — it just had not been used. Going forward, only System User tokens should be used.
+**This was validated the hard way:** The original token was a personal session token tied to Mike’s account. It expired April 21, 2026, breaking all three campaigns simultaneously. The System User CLOSRADS already existed in the Meta Business Manager with Admin access to both ad accounts — it just hadn’t been used. A new token was generated in May 2026.
 
 ---
 
-## D10 — Per-adset error isolation in the update loop
+## D10 — Per-adset error isolation
 
-**Decision:** In `_sync_campaign()`, the loop that calls `update_adset_geo()` for each adset wraps each call in a `try/except`. If one adset fails, the error is appended to `report.errors` and the loop continues to the next adset.
+**Decision:** Wrap each `update_adset_geo()` call in `try/except`. One failed adset logs an error and the loop continues.
 
-**Alternatives:** Abort the entire campaign sync on the first adset failure.
-
-**Reasoning:** The adsets are independent — a transient Facebook API error on one adset has no bearing on others. Aborting the entire sync on the first failure would leave all remaining adsets with stale targeting for the rest of the day.
-
-**The contrast with steps 1–3:** CLOSRTECH fetch, state mapping, and Facebook init use all-or-nothing failure. A failure at any of those steps means there is no valid basis for any updates. The asymmetry is intentional.
+**Reasoning:** Adsets are independent. A transient error on one should not leave the others with stale targeting. Steps 1–3 (CLOSRTECH, mapping, Facebook init) remain all-or-nothing — a failure there means no valid basis for any updates.
 
 ---
 
-## D11 — Single System User token shared across all three campaigns
+## D11 — Single System User token shared across all campaigns
 
-**Decision:** The same Facebook System User token is used for Veterans, Truckers, and Mortgage — even though Mortgage is in a different ad account (Inbounds `act_1007012848173879` vs CLOSRTECH `act_996226848340777`).
+**Decision:** The same Facebook System User token is used for Veterans, Truckers, and Mortgage — even though Mortgage is in a different ad account.
 
-**Alternatives:** Separate System User token per campaign or per ad account.
+**Reasoning:** Charlie confirmed the CLOSRADS System User has Admin access to both the CLOSRTECH and Inbounds Facebook ad accounts. A single System User token with multi-account access is the correct Meta architecture — simpler to manage (one token to rotate if ever needed), and the System User was already set up correctly.
 
-**Reasoning:** Charlie confirmed that the CLOSRADS System User (which already existed) has Admin access to both the CLOSRTECH and Inbounds Facebook ad accounts. A single System User token with multi-account access is the correct Meta architecture for this situation — it is simpler to manage (one token to rotate if ever needed) and the System User was already set up with the right permissions.
-
-**How this is implemented:** All three `*_FB_ACCESS_TOKEN` environment variables hold the same token value. The `facebook_client.init_api(access_token, ad_account_id)` function is called per campaign, so while the token is the same, the `ad_account_id` differs for Mortgage — which is the correct account binding.
+**How this works:** All three `*_FB_ACCESS_TOKEN` env vars hold the same value. `init_api(access_token, ad_account_id)` is called per campaign with the correct `ad_account_id` for each.
 
 ---
 
-## D12 — Mortgage uses a list of campaign IDs (`fb_campaign_ids`)
+## D12 — Mortgage uses a list of campaign IDs
 
-**Decision:** `CampaignConfig.fb_campaign_ids` is a `list[str]`. For Veterans and Truckers this list has one entry. For Mortgage it has two: `Bio MP` (`120245305494410017`) and `Bio MP2` (`120241447971000017`).
+**Decision:** `CampaignConfig.fb_campaign_ids` is a `list[str]`. For Veterans and Truckers it has one entry. For Mortgage it has two: Bio MP and Bio MP2.
 
-**Alternatives:** Treat each Facebook campaign as a separate CLOSRADS campaign entry (two Mortgage entries in `CAMPAIGNS`).
+**Reasoning:** Both Mortgage Facebook campaigns share the same CLOSRTECH data source. Treating them as separate CLOSRADS campaigns would mean calling `get_demand()` twice with the same params and producing two identical Slack/email blocks for what is logically one campaign.
 
-**Reasoning:** Both Mortgage Facebook campaigns share the same CLOSRTECH data source (`VND_MORTGAGE_PROTECTION_LEADS`). Treating them as separate CLOSRADS campaigns would mean calling `get_demand()` twice with the same parameters and applying the same demand data twice — redundant API calls, two Slack blocks for what is logically one campaign, and double the error surface.
-
-**How it works:** `_sync_campaign()` iterates over `campaign.fb_campaign_ids`, calls `get_active_adsets()` for each, and combines all adsets into one list before applying the demand. The result is one `SyncReport` for Mortgage with the combined adset count from both Facebook campaigns.
-
-**Config:** `MORTGAGE_FB_CAMPAIGN_IDS` (plural) stores the two IDs as a comma-separated string. The `_load_campaign()` helper detects whether to read `{PREFIX}_FB_CAMPAIGN_ID` (singular) or `{PREFIX}_FB_CAMPAIGN_IDS` (plural, split on comma).
+**Config:** `MORTGAGE_FB_CAMPAIGN_IDS` (plural) stores two IDs comma-separated. `_load_campaign()` detects the `_IDS` suffix and splits on comma.
 
 ---
 
-## D13 — Sync frequency: hourly cron instead of event-driven execution
+## D13 — 4-layer ad protection system
 
-**Decision**: The workflow runs on a fixed hourly cron schedule rather than being triggered by demand-change events.
+**Decision:** Instead of a simple geo targeting update, every adset update runs through 4 ordered layers: pre-flight check → cascade republish → post-republish verification → automatic rollback.
 
-**Alternatives**: Switch to an event-driven model that fires the sync only when a change in demand is detected (as requested by the client).
+**The problem this solves:** When the automation updated geo targeting via the Graph API, Meta triggered an internal re-validation of all child ads. Ads using lead forms (instant forms) were especially vulnerable — Meta silently broke the link between the ad and the form, causing error #3390001 and pausing the ad without warning. This was observed in the Truckers campaign and at least one Mortgage adset.
 
-**Reasoning**: Event-driven execution would require a separate layer to detect demand changes, adding significant complexity for little practical gain. An hourly cron is simple, cheap to run, and already gives near-real-time responsiveness — demand changes are picked up within 60 minutes at most, which covers the client's concern.
+**Why each layer:**
 
-**Config**: The cron expression moves from 0 8 * * * (once daily) to 0 * * * * (at the start of every hour). No other scheduling logic changes.
+- **Layer 1 (pre-flight):** Avoid touching an adset that’s already broken. The automation can’t fix a pre-existing issue, and modifying a broken adset’s targeting adds risk without benefit.
+- **Layer 2 (cascade republish):** The root fix, confirmed by Meta support. Sending `status=ACTIVE` to each ad explicitly re-confirms the lead form link after the geo change. Without this, Meta leaves the link in a pending state.
+- **Layer 3 (verification):** Trust but verify. The republish signal doesn’t guarantee instant resolution — waiting 3 seconds and checking gives Meta time to process and lets us detect if the problem persists.
+- **Layer 4 (rollback):** Guarantees the worst case is “not updated today.” Without rollback, a failed update leaves the adset in an intermediate state — new geo targeting but broken lead form links. Rollback returns it to its last known good state.
+
+**Trade-off:** This adds latency and extra API calls per adset. Acceptable because the adset count is small (5–10 per campaign) and the alternative is silent ad pausing.
+
+**Scope:** Applied to all campaigns, not just the ones where the issue was observed. Better to over-protect.
+
+---
+
+## D14 — HTML email to Charlie instead of Slack
+
+**Decision:** Replace Slack webhook notifications with an HTML email sent to Charlie after each sync.
+
+**Reasoning:** Charlie is the client-side contact who needs to see the sync reports. He is not in the Nheo Slack workspace. An email goes directly to him without requiring any Slack access or channel setup. HTML email allows the colored alert boxes (orange for pre-flight skips, red for rollbacks, green for clean runs) that make the report immediately readable.
+
+**Why Gmail App Password:** Gmail blocks direct SMTP access with the regular account password. An App Password is a separate credential generated in Google Account settings that’s specific to this application. It can be revoked without changing the main account password.
+
+**Optional design:** If the email vars are not configured, the system logs to stdout and continues. This means the automation still runs correctly even if email is misconfigured — the sync is never blocked by a notification failure.
+
+---
+
+## D15 — Remove hardcoded email from source code
+
+**Decision:** Charlie’s email address was removed from the source code entirely. All email credentials live exclusively in environment variables.
+
+**The problem:** The email was previously hardcoded as the default value for `NOTIFY_EMAIL`. Anyone who cloned the repo and ran the script without setting any env vars would unknowingly send emails to Charlie. This is a security and privacy concern — a third party running the code for testing purposes could spam Charlie’s inbox.
+
+**Fix:** `NOTIFY_EMAIL` is now a standard optional env var with no default. If absent, email notifications are disabled. The address is stored only in `.env` (local) and GitHub Secrets (production).
+
+**Rule:** No email address, credential, token, or personally identifiable information ever appears as a default value in source code.

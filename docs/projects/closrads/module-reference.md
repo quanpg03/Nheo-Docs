@@ -6,11 +6,9 @@ This section documents every module in `src/` in enough detail that any engineer
 
 ## `src/config.py` — Configuration & Validation
 
-**What it does:** Loads all environment variables at import time, validates every required variable is present and non-empty, and constructs the `CAMPAIGNS` list that drives the entire sync. If anything is missing, the program fails immediately with a clear error before making any API call.
+**What it does:** Loads all environment variables at import time, validates every required variable is present and non-empty, and constructs the `CAMPAIGNS` list that drives the entire sync.
 
-**Why fail-fast matters:** Without this, a missing env var causes a confusing error deep inside a CLOSRTECH or Facebook call — something like `NoneType is not iterable` with no obvious cause. With fail-fast: `ValueError: Missing required env var: VETERANS_FB_ACCESS_TOKEN` at startup, before any network call.
-
-### `CampaignConfig` dataclass
+**`CampaignConfig` dataclass:**
 
 | Field | Type | Example |
 |-------|------|--------|
@@ -20,203 +18,221 @@ This section documents every module in `src/` in enough detail that any engineer
 | `fb_ad_account_id` | `str` | `"act_996226848340777"` |
 | `fb_campaign_ids` | `list[str]` | `["120238960603460363"]` |
 
-### `_load_campaign(prefix: str) -> CampaignConfig`
+**`_load_campaign(prefix: str) -> CampaignConfig`** — reads per-campaign env vars using the given prefix (e.g., `"VETERANS"`). Supports both single `{PREFIX}_FB_CAMPAIGN_ID` and comma-separated `{PREFIX}_FB_CAMPAIGN_IDS` for Mortgage’s two IDs.
 
-Helper that reads per-campaign env vars using the given prefix (e.g., `"VETERANS"`).
-
-- Reads `{PREFIX}_CLOSRTECH_CAMPAIGN`, `{PREFIX}_FB_ACCESS_TOKEN`, `{PREFIX}_FB_AD_ACCOUNT_ID`
-- Supports both single ID (`{PREFIX}_FB_CAMPAIGN_ID`) and comma-separated list (`{PREFIX}_FB_CAMPAIGN_IDS`) to handle Mortgage's two campaign IDs
-- Returns a `CampaignConfig` instance
-
-### `CAMPAIGNS` list
-
-Built at import time by calling `_load_campaign()` for each of the three prefixes: `VETERANS`, `TRUCKERS`, `MORTGAGE`.
-
-```python
-CAMPAIGNS = [
-    _load_campaign("VETERANS"),
-    _load_campaign("TRUCKERS"),
-    _load_campaign("MORTGAGE"),
-]
-```
-
-`sync.py` iterates over this list — adding a fourth campaign requires only a new `.env` entry and one new line here.
+**`CAMPAIGNS` list** — built at import time. `sync.py` iterates over this. Adding a new campaign requires one `.env` entry and one new `_load_campaign()` call here.
 
 **Key behaviors:**
 
-- Calls `load_dotenv()` automatically on import — no other module needs to call it
-- `_require(name)`: raises `ValueError` if the variable is absent or empty string
-- `DRY_RUN` parsed as bool: accepts `"true"`, `"1"`, `"yes"` (case-insensitive). Defaults to `True` if unset — always safe by default
-- Logs a prominent `WARNING: DRY RUN MODE — no changes will be made to Facebook` at startup when `True`
+- `_require(name)`: raises `ValueError` if absent or empty
+- `DRY_RUN`: accepts `"true"`, `"1"`, `"yes"` (case-insensitive). Defaults to `True` if unset
+- Logs `WARNING: DRY RUN MODE` at startup when `True`
 
-**Shared env vars:** `CLOSRTECH_EMAIL`, `CLOSRTECH_PASSWORD`, `DRY_RUN`, `SLACK_WEBHOOK_URL`
+**Required env vars:** All per-campaign vars + `CLOSRTECH_EMAIL`, `CLOSRTECH_PASSWORD`
+
+**Optional env vars:**
+
+| Variable | Purpose | Default |
+|----------|---------|--------|
+| `DRY_RUN` | Run without writing to Facebook | `true` |
+| `SLACK_WEBHOOK_URL` | Slack notifications (legacy, replaced by email) | empty = disabled |
+| `SENDER_EMAIL` | Gmail address used to send notifications | empty = email disabled |
+| `SENDER_EMAIL_APP_PASSWORD` | Gmail App Password (not regular password) | empty = email disabled |
+| `NOTIFY_EMAIL` | Destination email for sync reports | empty = email disabled |
+
+**Important:** If any of the three email vars is missing or empty, email notifications are silently disabled — the system logs to stdout and continues normally. It does not raise an error.
 
 ---
 
 ## `src/closrtech_client.py` — CLOSRTECH API Client
 
-**What it does:** All communication with CLOSRTECH lives here. Nothing outside this module knows the URL, parameters, auth, retry logic, or error types.
+**What it does:** All communication with CLOSRTECH lives here.
 
 ### `get_demand(campaign: str) -> dict[str, int]`
 
-The only function called by the orchestrator. Fetches active state demand for a given campaign param.
-
-- **Parameter:** `campaign` — the CLOSRTECH campaign string (e.g., `"VND_VETERAN_LEADS"`). Previously read from `config` internally; now passed explicitly so each campaign in the loop can pass its own value.
+- **Parameter:** `campaign` — CLOSRTECH campaign string (e.g., `"VND_VETERAN_LEADS"`)
 - **Request:** `GET demand.php?campaign=<campaign>&email=...&pass=...`
-- **Credentials:** `config.CLOSRTECH_EMAIL` and `config.CLOSRTECH_PASSWORD` (shared across all campaigns)
-- **Timeout:** 30 seconds per attempt
-- **Retry:** 3 attempts via `tenacity`, exponential backoff at 4s, 8s, 16s. Only retries `ClosrtechError`. Does NOT retry `ClosrtechDataError` — retrying bad data won't fix it.
-- **Filtering:** Returns only states where `demand > 0`. Zero-demand states are excluded.
-- **Fail-safe:** If after filtering the result is empty AND the original response was non-empty (all zeros), raises `ClosrtechDataError` and aborts.
+- **Timeout:** 30 seconds | **Retry:** 3 attempts, exponential backoff 4s/8s/16s
+- **Filtering:** Returns only states where `demand > 0`
+- **Fail-safe:** If response is non-empty AND all values are zero → raises `ClosrtechDataError`
 
 ### `get_orders()` — Disabled (v2)
 
-Planned endpoint (`orders.php`) returns 404 for Veterans. Status untested for Truckers and Mortgage. Exists as a placeholder. Mike must escalate to the CLOSRTECH developer. Not called anywhere in v1.
+Planned endpoint (`orders.php`) returns 404 for Veterans. Status untested for Truckers and Mortgage. Not called in v1.
 
-**Error types:**
-
-- `ClosrtechError` — network failure, timeout, HTTP error (retriable)
-- `ClosrtechDataError` — invalid response or all-zeros fail-safe triggered (not retriable)
+**Error types:** `ClosrtechError` (retriable) | `ClosrtechDataError` (not retriable)
 
 ---
 
 ## `src/state_mapper.py` — USPS to Facebook Translation
 
-**What it does:** Converts CLOSRTECH's format (USPS 2-letter codes) to the exact format Facebook expects for geographic targeting (list of region objects with numeric keys).
-
-This module is unchanged by the multi-campaign refactor — it has no concept of campaigns and works identically for Veterans, Truckers, and Mortgage.
-
-**Why its own module:** CLOSRTECH client knows how to talk to CLOSRTECH. Facebook client knows how to talk to Facebook. The translation between their formats is a third responsibility that belongs to neither.
+**What it does:** Converts CLOSRTECH’s format (USPS 2-letter codes) to the Facebook format (list of region objects with numeric keys). Unchanged by all refactors.
 
 ### `usps_to_fb_region(usps_code) -> dict | None`
 
-- Loads `data/fb_region_keys.json` on first call and caches it in `_MAPPING` (module-level). Subsequent calls read from memory, never from disk again.
-- Normalizes input to uppercase: `"oh"`, `"OH"`, `" OH "` all resolve correctly.
-- Unknown code: logs a warning, returns `None`. Does not raise — one unmapped state should not abort the entire sync.
+- Loads and caches `data/fb_region_keys.json` in `_MAPPING` on first call
+- Case-insensitive lookup. Unknown code → logs warning, returns `None`
 - Returns: `{"key": "3878", "name": "Ohio", "country": "US"}`
 
 ### `build_fb_regions(active_states) -> list[dict]`
 
-- Takes the filtered CLOSRTECH dict (`{"OH": 15, "TX": 4, ...}`) and converts it to the list Facebook expects.
-- States that return `None` from `usps_to_fb_region()` are omitted (warning already logged).
-- **Edge case:** if every state fails to map (corrupted or missing `fb_region_keys.json`), returns empty list. `sync.py` detects this and aborts before touching Facebook.
+- Converts filtered CLOSRTECH dict to list Facebook expects
+- Omits unmapped states. Empty result → `sync.py` aborts before touching Facebook
 
 ---
 
 ## `src/facebook_client.py` — Facebook Graph API Wrapper
 
-**What it does:** All communication with Facebook lives here. No other module imports the `facebook-business` SDK or calls the Graph API directly. This module **does not import `config`** — all parameters are passed explicitly, which allows different campaigns to use different tokens and ad accounts.
+**What it does:** All communication with Facebook lives here. Does not import `config` — all parameters are passed explicitly. Contains the full 4-layer protection logic.
 
 ### `init_api(access_token: str, ad_account_id: str) -> AdAccount`
 
-- **Parameters:** `access_token` and `ad_account_id` passed explicitly (previously read from `config` internally — removed in the multi-campaign refactor).
-- Initializes the Facebook SDK session with the provided System User token.
-- Configures the `FacebookAdsApi` singleton (SDK requirement before any API call).
-- Returns an `AdAccount` object bound to the specified account for subsequent calls.
-- **Failure:** If the token is invalid, the SDK raises on the first actual API call (`get_active_adsets`), not here.
+- Initializes Facebook SDK with the provided System User token
+- Returns an `AdAccount` object bound to the specified account
 
 ### `get_active_adsets(ad_account, campaign_id) -> list[AdSet]`
 
-- Queries the Graph API for all adsets in the specified campaign.
-- Filters client-side for `effective_status == "ACTIVE"` — paused and archived adsets are excluded.
-- Requests only the fields needed: `id`, `name`, `targeting`, `effective_status`.
-- **Why `effective_status` not `status`:** `effective_status` reflects the combined state including whether the parent campaign is active.
+- Lists all adsets in a campaign filtered to `effective_status == "ACTIVE"`
+- Requests: `id`, `name`, `targeting`, `effective_status`
 
 ### `update_adset_geo(adset, fb_regions, dry_run) -> bool`
 
-- **Idempotency check:** Compares `current_keys` vs `desired_keys` as sets. If equal, skips the write and returns `False`.
-- **deepcopy pattern:** Reads the full current targeting object, makes a `copy.deepcopy()` of it, replaces only `geo_locations.regions` in the copy, then sends the copy as the update payload. Every other targeting field is preserved exactly as-is.
-- **DRY_RUN guard:** If `dry_run=True`, logs what would be done but makes no API call. Returns `True` (would have updated) so SyncReport shows correct count.
-- **Retry:** 3 attempts, exponential backoff at 5s, 10s, 20s via `tenacity`.
-- Returns `True` if an update was made (or would have been made in dry-run), `False` if skipped.
+- **Idempotency check:** Compares current vs desired region key sets. If equal, skips.
+- **deepcopy pattern:** Makes `copy.deepcopy()` of full targeting, replaces only `geo_locations.regions`, sends copy as update
+- **DRY_RUN guard:** Logs but makes no API call when `dry_run=True`
+- **Retry:** 3 attempts, exponential backoff 5s/10s/20s
+- Returns `True` if updated (or would have in dry-run), `False` if skipped
+
+### Layer 1 — `check_ad_health(adset) -> bool`
+
+**Pre-flight check.** Queries all ads in the adset and checks for active issues.
+
+- Returns `True` if any ad has existing problems (errors, disapprovals, or paused status from a prior issue)
+- Returns `False` if all ads are healthy
+- If `True`: `_sync_campaign()` skips this adset entirely that day and adds it to `report.adsets_skipped_preflight`
+- Rationale: if an ad is already broken, modifying the adset’s geo targeting would only add risk. Skip it and flag for manual review.
+
+### Layer 2 — `republish_ads(adset) -> list[str]`
+
+**Cascade republish.** Immediately after a geo targeting update, sends `status=ACTIVE` to every active ad in the adset.
+
+- Explicitly signals Meta’s servers: “this ad is still valid with the new targeting — confirm the lead form link”
+- Without this step, Meta leaves the link in a pending state and eventually pauses the ad (error #3390001)
+- This behavior was confirmed by Meta support and applies to any adset using lead forms (instant forms)
+- Applied to all campaigns as a precaution, not just the campaigns where the issue was observed
+- Returns list of ad IDs that were republished
+
+### Layer 3 — `verify_ads_after_republish(adset, wait_seconds: int = 3) -> list[dict]`
+
+**Post-republish verification.** Waits for Meta to process the republish signal, then queries ad statuses.
+
+- Waits `wait_seconds` (default: 3) to give Meta time to process
+- Queries all ad statuses in the adset
+- Returns a list of ads that still have issues after the republish
+- Empty list = all healthy, done
+- Non-empty list = some ads still broken → triggers Layer 4
+
+### Layer 4 — `rollback_geo(adset, original_targeting: dict) -> bool`
+
+**Automatic rollback.** If post-republish verification finds broken ads, restores the geo targeting to its exact pre-update state.
+
+- Takes the `original_targeting` dict captured before the update was made
+- Sends it back to Facebook as the adset’s current targeting
+- The adset is left as if it was never modified
+- Guarantees the worst possible outcome is “not updated today” — never “left in a worse state than before”
+- Returns `True` if rollback succeeded, `False` if the rollback API call itself failed (logged as a critical error)
 
 ### `_build_new_targeting(current_targeting, fb_regions) -> dict`
 
-Internal helper (underscore prefix — not called outside this module). Encapsulates the deepcopy + replace pattern so it can be unit-tested in isolation.
+Internal helper. Encapsulates the deepcopy + replace pattern.
 
 ---
 
 ## `src/sync.py` — Orchestrator
 
-**What it does:** `run_sync()` iterates over all configured campaigns, runs each through `_sync_campaign()`, collects all reports, and returns them as a list. A failure in one campaign does not abort the others.
+**What it does:** `run_sync()` iterates over all configured campaigns, runs each through `_sync_campaign()`, and returns a list of reports.
 
 ### `run_sync() -> list[SyncReport]`
 
 - Iterates over `config.CAMPAIGNS`
 - Calls `_sync_campaign(campaign)` for each
-- Returns `list[SyncReport]` — one report per campaign
-- A failure in one campaign does not abort the others — all campaigns run regardless
+- A failure in one campaign does not abort the others
 
 ### `_sync_campaign(campaign: CampaignConfig) -> SyncReport`
 
-Runs the full pipeline for one campaign:
+Full pipeline for one campaign, including the 4-layer protection per adset:
 
-1. `get_demand(campaign.closrtech_campaign)` — fetch CLOSRTECH demand for this campaign's param
-2. `build_fb_regions()` — translate states to FB format (abort if empty)
-3. `init_api(campaign.fb_access_token, campaign.fb_ad_account_id)` — initialize Facebook SDK
-4. For each `fb_campaign_id` in `campaign.fb_campaign_ids`: `get_active_adsets()` — collect all adsets
-5. Combine all adsets from all campaign IDs into one list (Mortgage has two IDs)
-6. `update_adset_geo()` per adset — isolated: one failure doesn't stop the rest
-7. Return `SyncReport` with `campaign_name` populated
+1. `get_demand(campaign.closrtech_campaign)` — fetch CLOSRTECH demand
+2. `build_fb_regions()` — translate states (abort if empty)
+3. `init_api(campaign.fb_access_token, campaign.fb_ad_account_id)`
+4. For each `fb_campaign_id`: `get_active_adsets()` — collect all adsets
+5. For each adset:
+   - **Layer 1:** `check_ad_health(adset)` — if True, skip and log to `adsets_skipped_preflight`
+   - Capture `original_targeting` before any change
+   - `update_adset_geo(adset, fb_regions, dry_run)` — update geo
+   - If updated and not dry-run:
+     - **Layer 2:** `republish_ads(adset)`
+     - **Layer 3:** `verify_ads_after_republish(adset)` — wait 3s, check statuses
+     - If broken ads found → **Layer 4:** `rollback_geo(adset, original_targeting)`, log to `adsets_reverted`
+6. Return `SyncReport`
 
-Steps 1–3 are all-or-nothing. Step 6 is per-adset isolated.
+Steps 1–3 are all-or-nothing. Step 5 is per-adset isolated (one failure doesn’t stop the rest).
 
 ### `SyncReport` (dataclass)
 
 | Field | Type | Meaning |
-|-------|------|---------|
+|-------|------|----------|
 | `campaign_name` | `str` | Human-readable name (e.g., `"Veterans"`) |
-| `adsets_processed` | `int` | Total active adsets found across all campaign IDs |
-| `adsets_updated` | `int` | Adsets where targeting was changed |
-| `adsets_skipped` | `int` | Adsets where targeting was already correct |
+| `adsets_processed` | `int` | Total active adsets found |
+| `adsets_updated` | `int` | Adsets where targeting was changed (and held after verification) |
+| `adsets_skipped` | `int` | Adsets skipped because targeting was already correct (idempotency) |
+| `adsets_skipped_preflight` | `int` | Adsets skipped because they had pre-existing broken ads (Layer 1) |
+| `adsets_reverted` | `int` | Adsets updated then rolled back because verification found broken ads (Layer 4) |
 | `active_states` | `list[str]` | USPS codes of states with demand > 0 |
-| `errors` | `list[str]` | Per-adset error messages (empty if all succeeded) |
+| `errors` | `list[str]` | Per-adset error messages |
 | `dry_run` | `bool` | Whether this was a dry run |
 | `success` | `bool` | `True` if no errors in `errors` list |
 
 ---
 
-## `src/notifier.py` — Slack or stdout Reporting
+## `src/notifier.py` — HTML Email Reporting
 
-**What it does:** Takes a list of completed `SyncReport` objects and delivers them. Sends one notification block per campaign. If `SLACK_WEBHOOK_URL` is configured, sends a structured message to Slack. If not, prints to stdout.
+**What it does:** Takes a list of completed `SyncReport` objects and sends an HTML email to Charlie. Replaced the previous Slack integration.
 
 ### `notify(reports: list[SyncReport])`
 
-- Iterates over reports and formats one block per campaign
-- Report format per campaign:
+- Checks if `SENDER_EMAIL`, `SENDER_EMAIL_APP_PASSWORD`, and `NOTIFY_EMAIL` are all configured
+- If any is missing: logs report to stdout and returns without error
+- If configured: sends one HTML email summarizing all campaigns
 
-```
-CLOSRADS Sync — Veterans | [DRY RUN] | 2026-04-25 13:01:22 UTC
-Status: SUCCESS
-Active states (34): AK, AR, AZ, CA, CO, CT, DE, FL, GA, HI...
-Adsets processed: 5 | Updated: 5 | Skipped: 0
-Errors: none
-```
+**Email format:**
 
-- If Slack fails (timeout, bad status code), logs a warning but does NOT raise — a notification failure should never mask the actual sync result.
-- Always called after all campaigns complete, regardless of success/failure.
+- Header: date, DRY RUN indicator if applicable
+- Per-campaign section with counts: updated / unchanged / skipped (pre-flight) / reverted
+- **Orange box** (if any `adsets_skipped_preflight > 0`): lists each skipped adset with the ad name and error description. Signals: “these adsets had broken ads before we ran — we left them alone, manual review needed.”
+- **Red box** (if any `adsets_reverted > 0`): explains which adsets were updated, then rolled back after verification found broken ads. Confirms targeting was restored to its previous state.
+- **Green box** (if all campaigns clean): “all campaigns ran without issues.”
+- Full list of active CLOSRTECH states for each campaign
+
+**Authentication:** Uses Gmail SMTP with an App Password (`SENDER_EMAIL_APP_PASSWORD`). This is a specific application password generated in Google Account settings — not the regular Gmail password. Required because Gmail blocks less-secure app access by default.
+
+**Failure handling:** If the email send fails (SMTP error, timeout, bad credentials), logs a warning but does NOT raise. A notification failure should never mask the actual sync result.
 
 ---
 
 ## `main.py` — Entry Point
 
-**What it does:** Minimal entry point. Configures logging, runs the sync, handles the exit code.
+**What it does:** Configures logging, runs the sync, handles the exit code.
 
-**Exit code logic:** Exits with code 1 if **any** campaign in the list had `report.success == False`. Exits 0 only if all campaigns succeeded.
-
-**Execution flow:**
+**Exit code logic:** Exits 1 if any campaign had `report.success == False`. Exits 0 if all campaigns succeeded.
 
 ```python
 if __name__ == "__main__":
     # 1. UTF-8 fix
     # 2. logging.basicConfig
     # 3. reports = run_sync()
-    # 4. sys.exit(0 if all(r.success for r in reports) else 1)
+    # 4. notify(reports)
+    # 5. sys.exit(0 if all(r.success for r in reports) else 1)
 ```
 
-**Why UTF-8 fix:** Python 3 on Windows defaults stdout to the system code page (often cp1252), which crashes when printing characters outside that range. `sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")` forces UTF-8 regardless of OS. GitHub Actions runs on Linux (UTF-8 by default) so this is a no-op there.
-
-**Logging config:**
-
-- Level: `INFO`
-- Format: `%(asctime)s [%(levelname)s] %(name)s: %(message)s`
+**Logging config:** Level `INFO`, format `%(asctime)s [%(levelname)s] %(name)s: %(message)s`
