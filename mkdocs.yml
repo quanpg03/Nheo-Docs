@@ -1,1 +1,133 @@
-site_name: Automation Team Nheo\nsite_description: Source of truth for the Nheo Automation Team. Notion is no longer maintained.\nsite_author: Nheo Automation Team\nsite_url: https://nheo-docs.pages.dev/\n\nrepo_name: Nheo-Docs\nrepo_url: https://github.com/quanpg03/Nheo-Docs\nedit_uri: edit/main/docs/\n\ntheme:\n  name: material\n  palette:\n    - scheme: slate\n      primary: custom\n      accent: custom\n      toggle:\n        icon: material/brightness-4\n        name: Switch to light mode\n    - scheme: default\n      primary: custom\n      accent: custom\n      toggle:\n        icon: material/brightness-7\n        name: Switch to dark mode\n  font:\n    text: Inter\n    code: JetBrains Mono\n  custom_dir: docs/overrides\n  features:\n    - navigation.tabs\n    - navigation.tabs.sticky\n    - navigation.sections\n    - navigation.expand\n    - navigation.path\n    - navigation.top\n    - navigation.instant\n    - navigation.instant.progress\n    - search.highlight\n    - search.suggest\n    - search.share\n    - content.code.copy\n    - content.code.annotate\n    - content.action.edit\n    - toc.follow\n    - header.autohide\n  icon:\n    repo: fontawesome/brands/github\n    edit: material/pencil\n\nextra_css:\n  - stylesheets/extra.css\n\nplugins:\n  - search:\n      lang: en\n  - glightbox\n\nmarkdown_extensions:\n  - admonition\n  - pymdownx.details\n  - pymdownx.superfences:\n      custom_fences:\n        - name: mermaid\n          class: mermaid\n          format: !!python/name:pymdownx.superfences.fence_code_format\n  - pymdownx.highlight:\n      anchor_linenums: true\n      line_spans: __span\n      pygments_lang_class: true\n  - pymdownx.inlinehilite\n  - pymdownx.snippets\n  - pymdownx.tabbed:\n      alternate_style: true\n  - pymdownx.tasklist:\n      custom_checkbox: true\n  - pymdownx.emoji:\n      emoji_index: !!python/name:material.extensions.emoji.twemoji\n      emoji_generator: !!python/name:material.extensions.emoji.to_svg\n  - attr_list\n  - md_in_html\n  - tables\n  - footnotes\n  - toc:\n      permalink: true\n\nnav:\n  - Home: index.md\n\n  - Knowledge Base:\n    - knowledge-base/index.md\n    - AWS Infrastructure:\n      - v2 Active Template: knowledge-base/aws-infrastructure/v2-active.md\n      - v1 Historical: knowledge-base/aws-infrastructure/v1-historical.md\n      - Team Analysis & Decision Log: knowledge-base/aws-infrastructure/team-analysis-decision-log.md\n\n  - Projects:\n    - projects/index.md\n    - CLOSRADS:\n      - Overview: projects/closrads/overview.md\n      - Architecture: projects/closrads/architecture.md\n      - Module Reference: projects/closrads/module-reference.md\n      - GitHub Actions & CI/CD: projects/closrads/github-actions.md\n      - Tests & Coverage: projects/closrads/tests.md\n      - Activation Plan: projects/closrads/activation-plan.md\n      - Design Decisions: projects/closrads/design-decisions.md\n      - Changelog: projects/closrads/changelog.md\n    - OpenClaw:\n      - Overview: projects/openclaw/overview.md\n      - Operations: projects/openclaw/operations.md\n      - Architecture: projects/openclaw/architecture.md\n      - Support Playbook: projects/openclaw/support-playbook.md\n      - Incidents & Lessons Learned: projects/openclaw/incidents.md\n      - Security Audit: projects/openclaw/security-audit.md\n      - Compliance Matrix: projects/openclaw/compliance-matrix.md\n      - Gap Analysis & Roadmap: projects/openclaw/gap-analysis-roadmap.md\n\n  - SOPs:\n    - Overview: sops/README.md\n    - How We Work: sops/how-we-work.md\n    - Development Process: sops/development-process.md\n    - Research Process: sops/research-process.md\n    - Documentation Standards: sops/documentation-standards.md\n\n  - Research:\n    - research/README.md\n\nextra:\n  social:\n    - icon: fontawesome/brands/github\n      link: https://github.com/quanpg03/Nheo-Docs\n  generator: false\n\ncopyright: \"&copy; Nheo Automation Team — Internal Use Only\"\n
+site_name: Automation Team Nheo
+site_description: Source of truth for the Nheo Automation Team. Notion is no longer maintained.
+site_author: Nheo Automation Team
+site_url: https://nheo-docs.pages.dev/
+
+repo_name: Nheo-Docs
+repo_url: https://github.com/quanpg03/Nheo-Docs
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  font:
+    text: Inter
+    code: JetBrains Mono
+  custom_dir: docs/overrides
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.path
+    - navigation.top
+    - navigation.instant
+    - navigation.instant.progress
+    - search.highlight
+    - search.suggest
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.action.edit
+    - toc.follow
+    - header.autohide
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+
+extra_css:
+  - stylesheets/extra.css
+
+plugins:
+  - search:
+      lang: en
+  - glightbox
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - toc:
+      permalink: true
+
+nav:
+  - Home: index.md
+
+  - Knowledge Base:
+    - knowledge-base/index.md
+    - AWS Infrastructure:
+      - v2 Active Template: knowledge-base/aws-infrastructure/v2-active.md
+      - v1 Historical: knowledge-base/aws-infrastructure/v1-historical.md
+      - Team Analysis & Decision Log: knowledge-base/aws-infrastructure/team-analysis-decision-log.md
+
+  - Projects:
+    - projects/index.md
+    - CLOSRADS:
+      - Overview: projects/closrads/overview.md
+      - Architecture: projects/closrads/architecture.md
+      - Module Reference: projects/closrads/module-reference.md
+      - GitHub Actions & CI/CD: projects/closrads/github-actions.md
+      - Tests & Coverage: projects/closrads/tests.md
+      - Activation Plan: projects/closrads/activation-plan.md
+      - Design Decisions: projects/closrads/design-decisions.md
+      - Changelog: projects/closrads/changelog.md
+    - OpenClaw:
+      - Overview: projects/openclaw/overview.md
+      - Operations: projects/openclaw/operations.md
+      - Architecture: projects/openclaw/architecture.md
+      - Support Playbook: projects/openclaw/support-playbook.md
+      - Incidents & Lessons Learned: projects/openclaw/incidents.md
+      - Security Audit: projects/openclaw/security-audit.md
+      - Compliance Matrix: projects/openclaw/compliance-matrix.md
+      - Gap Analysis & Roadmap: projects/openclaw/gap-analysis-roadmap.md
+
+  - SOPs:
+    - Overview: sops/README.md
+    - How We Work: sops/how-we-work.md
+    - Development Process: sops/development-process.md
+    - Research Process: sops/research-process.md
+    - Documentation Standards: sops/documentation-standards.md
+
+  - Research:
+    - research/README.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/quanpg03/Nheo-Docs
+  generator: false
+
+copyright: "&copy; Nheo Automation Team — Internal Use Only"
