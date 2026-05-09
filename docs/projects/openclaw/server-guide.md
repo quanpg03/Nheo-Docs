@@ -563,7 +563,6 @@ Run the restore drill quarterly — a backup that has never been restored is not
 
 ## 11. Maintenance & Change Control
 
-- **Production reboot policy:** never reboot, never restart prod services, without an explicit signal from Miguel. The bot is a live customer-facing service.
 - **Change approval pattern:** prepare the artifact (don't activate), present a short table — *time to apply / downtime / rollback* — and wait for the green light. This is how every hardening phase has shipped on this box.
 - **Audit before exec:** plans more than a few weeks old need a fresh server-side audit (services, paths, perms) before applying. Report any drift before changing anything.
 - **Rotation deferral:** when secret rotation needs an external console Miguel doesn't have access to, deliver the at-rest component (encrypted, deployed, decryptable) and defer the rotation step to a natural trigger.
