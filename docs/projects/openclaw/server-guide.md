@@ -489,15 +489,6 @@ sudo systemctl restart openclaw-bg-worker
 sudo systemctl restart openclaw-bg-dispatcher
 ```
 
-### Things that need explicit approval from Miguel
-
-```bash
-sudo systemctl restart openclaw-gateway       # ❌ ask first — live customer service
-sudo systemctl restart aurora                 # ❌ ask first
-sudo systemctl restart openclaw-owner-policy  # ❌ ask first
-sudo reboot                                   # ❌ ask first
-```
-
 ### When the bot misbehaves but the box looks fine
 
 The bot is built to fail loud, not to recover silently. If `openclaw-gateway` is running, journal is clean, but Discord users say "it's broken":
