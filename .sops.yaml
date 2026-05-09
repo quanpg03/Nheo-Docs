@@ -1,0 +1,14 @@
+# sops creation rules for the Nheo-Docs repository.
+#
+# All encrypted artifacts under docs/projects/openclaw/secrets/ are encrypted
+# against the OpenClaw production master age public key. The matching private
+# key lives ONLY at /root/.config/sops/age/keys.txt on 159.89.179.179 plus the
+# physical break-glass copies (paper safe + encrypted USB) Miguel manages.
+#
+# Adding a new key/recipient: edit this file, append the recipient under `age:`
+# (comma-separated), then run `sops updatekeys docs/projects/openclaw/secrets/<file>.enc`
+# for every existing artifact so it can also be decrypted by the new key.
+
+creation_rules:
+  - path_regex: docs/projects/openclaw/secrets/.*\.enc$
+    age: age1gldetnvfnelxp9r7700msnxe7z90rt576ktvxpm0kee7wdh5kdrsywm0f2
