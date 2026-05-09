@@ -43,27 +43,52 @@ ssh -p 22022 -i ~/.ssh/id_rsa miguel@159.89.179.179
 | LoginGraceTime | 30s | `99-hardening.conf` |
 | Banner | `/etc/issue.net` | `99-hardening.conf` |
 
-### Adding a new operator
-
-Password auth is disabled — the only way in is a key. To grant a teammate access:
-
-1. Get their SSH public key (e.g. `id_ed25519.pub`) over a trusted channel.
-2. As `miguel`, append it to `/home/miguel/.ssh/authorized_keys` (one key per line).
-   `chmod 600 /home/miguel/.ssh/authorized_keys && chmod 700 /home/miguel/.ssh`.
-3. Test from their workstation: `ssh -p 22022 -i ~/.ssh/<their_key> miguel@159.89.179.179`.
-4. Do **not** create a new interactive Linux user without asking — the user table is small and audited.
-
 > **Common pitfall — "SSH timed out, must be the firewall."** SSH is on **22022**, not 22. Before blaming firewall rules, verify the port: `nc -zv 159.89.179.179 22022`. The local hardened firewall does not block egress.
 
 ### Accounts
 
-| User | UID | Purpose | Sudo? |
-|---|---|---|---|
-| `miguel` | 1002 | Operator login | Yes |
-| `agent` | 1000 | Service account — owns `/home/agent/.openclaw/`, runs gateway/worker/dispatcher | No (allowlist only) |
-| `do-agent` | 999 | DigitalOcean monitoring agent | No |
+| User | UID | Home | Shell | Purpose | Sudo? |
+|---|---|---|---|---|---|
+| `miguel` | 1002 | `/home/miguel` | bash | Operator (Miguel Legarda) | Yes — `NOPASSWD: ALL` via `/etc/sudoers.d/90-miguel` |
+| `juanesteban` | 1001 | `/home/juanesteban` | bash | Operator (Juan Esteban) | Yes — `NOPASSWD: ALL` via `/etc/sudoers.d/90-juanesteban` |
+| `agent` | 1000 | `/home/agent` | bash | Service account — owns `/home/agent/.openclaw/`, runs gateway/worker/dispatcher | No (sudo only via the bg-worker allowlist) |
+| `do-agent` | 999 | (system) | nologin | DigitalOcean droplet monitoring | No |
+| `root` | 0 | `/root` | bash | System root — **direct SSH disabled** (`PermitRootLogin no`), reach it with `sudo -i` | n/a |
 
-`miguel` is the only sudo user. `agent` does not have sudo and must not get it — the bot's blast radius is contained by that boundary. A small allowlist of bg-worker sudo commands lives at `/home/agent/.openclaw/workspace/runtime/bg_sudo_allowlist.json`.
+`miguel` and `juanesteban` are the two human operators. Decision is fixed (per the Phase-3 hardening sprint): both retain `NOPASSWD: ALL`. Any additional human account requires explicit approval — the user table is small and audited.
+
+`agent` does not have general sudo and must not get it — the bot's blast radius is contained by that boundary. A small allowlist of bg-worker sudo commands lives at `/etc/sudoers.d/openclaw-bg-allowlist` (with the runtime config at `/home/agent/.openclaw/workspace/runtime/bg_sudo_allowlist.json`).
+
+### Existing SSH keys
+
+Each account's key is in its own `~/.ssh/authorized_keys`. Snapshot at the time this guide was written:
+
+| Account | Key type | Comment / fingerprint hint |
+|---|---|---|
+| `miguel` | `ssh-rsa` | `miguel@arpagrowth` |
+| `juanesteban` | `ssh-ed25519` | `juanespg03@gmail.com` |
+| `agent` | `ssh-ed25519` | `openclaw-do` (used for cross-machine bot automation) |
+| `root` | `ssh-ed25519` | `openclaw-do` — **inactive at runtime** because `PermitRootLogin no`; kept for emergency single-user/recovery flows |
+
+### Adding a new operator
+
+Password auth is disabled — the only way in is an SSH key. The pattern is one Linux account per operator, with their own home and their own `authorized_keys` (do not pile keys onto someone else's account).
+
+```bash
+# As miguel (or juanesteban):
+NEW=jane
+sudo useradd -m -s /bin/bash "$NEW"
+sudo install -d -m 700 -o "$NEW" -g "$NEW" "/home/$NEW/.ssh"
+sudo install -m 600 -o "$NEW" -g "$NEW" /dev/null "/home/$NEW/.ssh/authorized_keys"
+echo 'ssh-ed25519 AAAA... jane@laptop' | sudo tee -a "/home/$NEW/.ssh/authorized_keys"
+
+# Sudo (only if the operator is meant to administer the box):
+echo "$NEW ALL=(ALL) NOPASSWD: ALL" | sudo tee "/etc/sudoers.d/90-$NEW"
+sudo chmod 440 "/etc/sudoers.d/90-$NEW"
+sudo visudo -cf "/etc/sudoers.d/90-$NEW"   # syntax-check before logout
+```
+
+Test from the operator's workstation: `ssh -p 22022 -i ~/.ssh/<their_key> jane@159.89.179.179`. **Do not** add the new user to a shared account — accountability and `lastlog` rely on one human per UID.
 
 ---
 
