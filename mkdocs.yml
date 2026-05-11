@@ -106,6 +106,8 @@ nav:
       - Changelog: projects/closrads/changelog.md
     - OpenClaw:
       - Overview: projects/openclaw/overview.md
+      - Engineer Onboarding: projects/openclaw/engineer-onboarding.md
+      - Server Guide: projects/openclaw/server-guide.md
       - Operations: projects/openclaw/operations.md
       - Architecture: projects/openclaw/architecture.md
       - Support Playbook: projects/openclaw/support-playbook.md
