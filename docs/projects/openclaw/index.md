@@ -19,5 +19,6 @@ Start here:
 | [`incidents.md`](./incidents.md) | 10 incidents and lessons learned from Phase 1 |
 | [`security-audit.md`](./security-audit.md) | Server security audit — 27 findings, remediation plan |
 | [`server-guide.md`](./server-guide.md) | Server operations guide — SSH, services, logs, manual scripts, DB access, reverse proxy, troubleshooting |
+| [`runtime-testing-guide.md`](./runtime-testing-guide.md) | Runtime testing manual — Discord and server-side test paths, T1–T18 battery, troubleshooting, known non-bugs |
 | [`compliance-matrix.md`](./compliance-matrix.md) | R01–R33 requirements compliance |
 | [`gap-analysis-roadmap.md`](./gap-analysis-roadmap.md) | G01–G13 gap inventory and prioritized roadmap |
