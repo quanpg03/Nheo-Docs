@@ -1,6 +1,6 @@
 # Incidents & Lessons Learned
 
-This document covers the 10 technical blockers encountered and resolved during Phase 1 of the ReadyMode Bot build. This is the most valuable institutional knowledge from Phase 1 — the next engineer to work on this system should read this before touching anything.
+This document covers the technical blockers encountered and resolved during the ReadyMode Bot build. Incidents 1–10 originated in Phase 1; Incident 11 was logged during Phase 3. This is the most valuable institutional knowledge of the project — the next engineer to work on this system should read this before touching anything.
 
 ---
 
@@ -18,6 +18,7 @@ This document covers the 10 technical blockers encountered and resolved during P
 | 8 | Exec timeout too short | Configuration | `tools.exec.backgroundMs: 90000` |
 | 9 | Polling spam saturating gateway | Agent behavior | Min 20 s between polls, max 4 polls total |
 | 10 | Dynamic `set_pass` field not saving | DOM/form | Dispatch `input` event to trigger `oninput` handler |
+| 11 | Droplet rebuild after undocumented SSH port change (2026-05-13) | Operations / access | Restore from snapshot `OpenClow-1777504389728`; add SERVER_ACCESS_RUNBOOK.md; mandate remote-branch persistence before closing issues |
 
 ---
 
@@ -148,3 +149,21 @@ input.dispatchEvent(new Event('input', { bubbles: true }));
 ```
 
 **Lesson:** Non-standard attribute patterns (`xname`, `data-name`, dynamic `name` promotion) exist in older or custom web apps. When a field value disappears on submit, inspect the form submission payload directly (via CDP Network events) to verify what's actually being sent, rather than relying on visual inspection.
+
+---
+
+## Incident 11 — Droplet Rebuild After Undocumented SSH Port Change (2026-05-13)
+
+**Symptom:** Simultaneous loss of SSH access to the production droplet (`159.89.179.179`) for multiple team members on 2026-05-13. Reconnections to port 22 timed out without any actionable error. The persistent 14-day SSH session that operations had been relying on had expired, masking the underlying configuration drift.
+
+**Root cause:** On 2026-04-29 the SSH daemon was migrated from port 22 to port 22022 as part of NHE-29 hardening, via `/etc/ssh/sshd_config.d/99-hardening.conf`. The change was applied directly to production without a corresponding entry in a shared access runbook and without notifying the operations team. As long as existing SSH sessions stayed alive the change was invisible; once the 14-day persistent session expired, every client still pointing at port 22 was locked out.
+
+**Fix:** Operations performed a destructive droplet rebuild from the most recent DigitalOcean snapshot (`OpenClow-1777504389728`, taken 2026-04-29, 17.09 GB, NYC3) to recover SSH access. The rebuild restored the system to its 2026-04-29 state. Hardening layers (AppArmor profiles, SOPS+age binaries, DNS-over-TLS, sudo allowlist, cloudflared non-root) were re-applied and verified in the post-rebuild audit (2026-05-14). The self-hosted GitHub Actions runner under `/home/agent/actions-runner/` survived on disk but lost its systemd unit and was unregistered from GitHub — it requires re-registration via a fresh registration token.
+
+Side effect: any work persisted only on the droplet filesystem between 2026-04-29 and 2026-05-13 was lost, including artifacts associated with twelve Linear issues that had been marked Done during that window. Those issues are being reopened and the work redone.
+
+**Lesson:** Three independent failures had to align for this incident to occur, and any one of them being addressed in advance would have prevented it:
+
+1. **Access-plane changes must be documented before they ship.** Any change that affects how operators reach production — SSH port, firewall, sudo, AppArmor, key rotation, MFA — must be written into a `SERVER_ACCESS_RUNBOOK.md` checked into Nheo-Docs and announced in the operations channel before the change is applied. Long-lived SSH sessions hide configuration drift; the next disconnect is the deadline.
+2. **Closing an issue requires remote persistence.** Code, configuration, or scripts that exist only on a production filesystem are one snapshot rollback away from disappearing. Before marking a Linear issue Done, the corresponding work must be committed and pushed to a remote branch of the project's repository.
+3. **Snapshot cadence must be automatic.** Relying on manual, on-demand snapshots makes the recovery window equal to the elapsed time since the last person remembered to take one. A daily automated snapshot policy bounds the worst-case data loss to 24 hours.
