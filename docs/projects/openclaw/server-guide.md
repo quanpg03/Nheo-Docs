@@ -51,11 +51,12 @@ ssh -p 22022 -i ~/.ssh/id_rsa miguel@159.89.179.179
 |---|---|---|---|---|---|
 | `miguel` | 1002 | `/home/miguel` | bash | Operator (Miguel Legarda) | Yes — `NOPASSWD: ALL` via `/etc/sudoers.d/90-miguel` |
 | `juanesteban` | 1001 | `/home/juanesteban` | bash | Operator (Juan Esteban) | Yes — `NOPASSWD: ALL` via `/etc/sudoers.d/90-juanesteban` |
+| `nat` | 1003 | `/home/nat` | bash | Operator (Natalia) — added 2026-05-18 | Yes — `NOPASSWD: ALL` via `/etc/sudoers.d/90-nat` |
 | `agent` | 1000 | `/home/agent` | bash | Service account — owns `/home/agent/.openclaw/`, runs gateway/worker/dispatcher | No (sudo only via the bg-worker allowlist) |
 | `do-agent` | 999 | (system) | nologin | DigitalOcean droplet monitoring | No |
 | `root` | 0 | `/root` | bash | System root — **direct SSH disabled** (`PermitRootLogin no`), reach it with `sudo -i` | n/a |
 
-`miguel` and `juanesteban` are the two human operators. Decision is fixed (per the Phase-3 hardening sprint): both retain `NOPASSWD: ALL`. Any additional human account requires explicit approval — the user table is small and audited.
+`miguel`, `juanesteban`, and `nat` are the three human operators. Decision is fixed (per the Phase-3 hardening sprint): all retain `NOPASSWD: ALL`. Any additional human account requires explicit approval — the user table is small and audited.
 
 `agent` does not have general sudo and must not get it — the bot's blast radius is contained by that boundary. A small allowlist of bg-worker sudo commands lives at `/etc/sudoers.d/openclaw-bg-allowlist` (with the runtime config at `/home/agent/.openclaw/workspace/runtime/bg_sudo_allowlist.json`).
 
@@ -67,8 +68,14 @@ Each account's key is in its own `~/.ssh/authorized_keys`. Snapshot at the time 
 |---|---|---|
 | `miguel` | `ssh-rsa` | `miguel@arpagrowth` |
 | `juanesteban` | `ssh-ed25519` | `juanespg03@gmail.com` |
+| `nat` | `ssh-ed25519` | `juanesteban` (key generated on Nat's machine — added 2026-05-18 by Miguel) |
 | `agent` | `ssh-ed25519` | `openclaw-do` (used for cross-machine bot automation) |
 | `root` | `ssh-ed25519` | `openclaw-do` — **inactive at runtime** because `PermitRootLogin no`; kept for emergency single-user/recovery flows |
+
+**Nat's SSH command:**
+```bash
+ssh -p 22022 -i ~/.ssh/id_ed25519 nat@159.89.179.179
+```
 
 ### Adding a new operator
 
