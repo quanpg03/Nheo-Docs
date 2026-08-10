@@ -1,126 +1,105 @@
-# OpenClaw — ReadyMode Bot (Arpa Growth)
+# OpenClaw ReadyMode Bot — Fleet Overview
 
-**Linear Project:** OpenClaw Project  
-**Engineer:** Miguel Legarda  
-**Status as of:** 2026-04-16  
-**Last verified end-to-end:** 2026-04-11
+**Status as of:** 2026-08-06  
+**Lead engineer:** Miguel Legarda  
+**Version:** 2.0 — Python + Playwright + Claude Haiku (replaces original OpenClaw gateway, June 2026)
 
 ---
 
 ## Quick Reference
 
 | Property | Value |
-|----------|-------|
-| Client | Arpa Growth (insurance agency) |
-| Client contact | Charlie |
-| Platform (CRM) | ReadyMode — arpagrowth.readymode.com |
-| Interaction channel | Discord — #readymode-soporte |
-| Server | DigitalOcean — 159.89.179.179 (Ubuntu 24.04, 2 GB RAM + 2 GB swap) |
-| LLM engine | gpt-4.1-mini (OpenAI) |
-| Operations required | 4 (Clear Licenses, Reset Leads, Create User, Upload Leads) |
-| Operations in production | 3 of 4 (75%) |
-| Conversational support scenarios | 13 implemented |
-| Overall functional completeness | ~60% |
+|---|---|
+| Interaction channel | Discord (per-agency channel IDs or ticket-channel regex) |
+| Infrastructure | AWS EC2 + Docker — one container per agency |
+| LLM | Claude Haiku (intent parsing + response phrasing) |
+| Browser automation | Playwright (Chromium, headless) |
+| Bot framework | Python + nextcord |
+| Fleet | 15 containers in operation as of 2026-08-06 |
+| Total known accounts | 21 |
+| Automated operations | 7 intents + KB fallback |
+| Code repository | GitHub — branch-per-agency (`agency/<name>`) |
 
 ---
 
-## Current Status at a Glance
+## What This Is
 
-| Operation | Status | Notes |
-|-----------|--------|-------|
-| Clear Licenses | ✅ Done | 100% — verified 2026-04-09 |
-| Reset Leads | 🔴 Blocked | Office Map empty — Charlie must assign agents |
-| Create User (steps 1–4) | ✅ Done | Account creation + password — verified 2026-04-11 |
-| Create User playlist (steps 5–9) | 🔴 Not started | Critical gap — needs screenshots from Charlie |
-| Upload Leads (basic flow) | ✅ Done | Standard headers + existing campaign — verified 2026-04-10 |
-| Conversational KB / Support | ✅ Done | 13 troubleshooting scenarios |
-| Discord integration | ✅ Done | Bot active, bilingual ES/EN |
+A self-hosted, multi-tenant Discord bot fleet that allows call-center managers to control ReadyMode CRM using natural-language commands in Discord. Each client agency gets its own isolated Docker container with its own bot token, ReadyMode credentials, and Anthropic API key. No operation in one container can affect any other.
+
+**This system fully replaced the original OpenClaw Node.js gateway in June 2026.** The original system ran a single client (Arpa Growth / arpagrowth.readymode.com) on a DigitalOcean droplet using bash scripts driven by Chrome DevTools Protocol (CDP) and gpt-4.1-mini for intent parsing. The current system is Python + Playwright + Claude Haiku, multi-tenant from the ground up, running on AWS EC2.
+
+### Why ReadyMode has no API
+
+ReadyMode exposes no public API and actively blocks AI-agent traffic at the API layer. All automation drives the live UI via Playwright (headless Chromium), exactly as a human operator would.
 
 ---
 
-## Background & Why This Was Built
+## Current Fleet Status
 
-Arpa Growth is an insurance agency that relies on **ReadyMode** as their primary dialer/CRM. The platform manages agent licenses, lead distribution, user accounts, and call routing.
+| Containers running | Messaging sessions active | Accounts with ticket-channel access |
+|---|---|---|
+| 15 / 15 | 14 / 14 | 5 verified |
 
-Managers were spending significant time on repetitive CRM tasks — clearing inactive licenses when agents got locked out, resetting leads for individual agents, creating new user accounts from scratch, and uploading lead files. These tasks required manual login, multiple UI clicks, and careful configuration each time.
+Six additional accounts are known but not yet mounted. Two accounts (Hooper, Surf) had zero inventory as of 2026-08-05 — their ReadyMode dialers had not been populated by the clients yet.
 
-A critical constraint defined the entire technical approach: **ReadyMode has no open API and actively rejects AI agent integration at the API level.** The only viable path was direct UI automation — the bot had to operate ReadyMode exactly as a human would, by clicking through the browser.
-
-Built on **OpenClaw** (the team's self-hosted AI agent gateway), using Chrome headless (CDP) for browser automation and Discord as the communication layer.
-
-### Platform Constraints That Shaped the Architecture
-
-- No open API — all automation must go through the ReadyMode web UI
-- ReadyMode explicitly rejects AI agent API access
-- Heavy use of React/SPA rendering — direct URL navigation often returns blank DOM; navigation must go through UI clicks
-- Several UI elements use non-standard event handling (native value setters required for React input fields)
-- Some operations involve drag-and-drop (playlist configuration), which is technically complex in headless Chrome via CDP
+See [`fleet-status.md`](./fleet-status.md) for the full per-account table.
 
 ---
 
-## Original Requirements — 4 Primary Operations
+## 7 Automated Operations + KB
 
-The client specified 4 operations the bot must perform, each triggered by a manager message in Discord.
+| Operation | Intent key | Notes |
+|---|---|---|
+| Create User | `create_user` | Account + playlist + state/campaign filters + member assignment |
+| Create Playlist | `create_playlist` | Standalone playlist without account creation |
+| Reset Leads | `reset_leads` | Resets leads queue for a specified agent |
+| Clear Licenses | `clear_licenses` | Signs out inactive users to free ReadyMode licenses |
+| User Exists | `user_exists` | Confirms whether an agent account exists |
+| User Playlist | `user_playlist` | Finds which playlist a specific agent belongs to |
+| Playlist Members | `playlist_members` | Lists all agents assigned to a specific playlist |
+| KB Support | `kb_support` | Hardcoded Q&A for common ReadyMode questions (bilingual ES/EN, no Playwright) |
 
-**Clear Licenses (4 steps):** Triggered when agents get a "We're sorry..." license error. Login → Click "License Usage" → Click "Sign Out Inactive Users" → OK popup + logout.
-
-**Reset Leads (4 steps):** Triggered when an agent needs their leads reset. Login → Click "VIEW OFFICE MAP" → Find agent + click "Reset Leads" → Logout.
-
-**Create User (9 steps — most complex):** Requires agent name, states, and campaigns before proceeding. Login → Click Users → Click green + button → Enter name + password + SAVE → Click Leads → Add a Playlist → Enter playlist name → Drag-and-drop campaigns and states → Assign user to playlist + verify "1 member".
-
-**Upload Leads (variable steps):** Triggered when a manager sends a CSV. Accept CSV → Match headers → Select/create campaign → Import → Handle duplicates:
-
-| Duplicate mode | When to use |
-|----------------|-------------|
-| Reject (default) | Standard uploads — new leads |
-| Merge | Correcting a previous upload error (wrong column mapping, missing field) |
-| Accept | Uploading surveys that already exist in the system as paid leads |
-| Move | When a file has many duplicates — find the lead in search bar and move it to the requested campaign |
+`kb_support` does not open a browser session — it is a direct dictionary lookup via `kb.py`.
 
 ---
 
-## Conversational Support — 13 Scenarios
+## Architecture at a Glance
 
-Beyond the 4 automated operations, the bot handles common support questions conversationally as first-line support.
+```
+Discord message
+  → Bot (nextcord)
+  → Validation
+  → Intent Parser (Claude Haiku)
+  → Dispatcher
+  → Executor (Playwright + Chromium)
+  → Responder (Claude Haiku)
+  → Discord reply
+```
 
-| Scenario | Bot response logic |
-|----------|-------------------|
-| No assignments | Timing issue (late EST/PST) — check PST states, advise log out/in |
-| Single state pickups | Verify all states in playlist — suggest log out/in — temporarily remove highest-pickup state if persists |
-| No pickups | Check playlist members, states, campaigns, agent connection status — escalate to ReadyMode support (1-800-694-1049) if unresolved |
-| License error ("We're Sorry") | Trigger Clear Licenses automation |
-| Only receiving inbounds | Log out/in first — remove agent from inbound queues if problem persists |
-| 3+ min per pickup | Check state count and campaign size — advise timing or "buy more states" |
-| Wrong credentials | Send manager a screenshot of correct credentials |
-| Connection problems | Advise: change browser, use private/stable network, disable VPN — escalate to 1-800-694-1049 ext. 4 |
-| Duplicate leads — correction | Advise Merge duplicates |
-| Duplicate leads — surveys | Advise Accept duplicates |
-| Duplicate leads — other | Advise moving leads to the requested campaign |
-| Call results — standard campaigns | Normal call results |
-| Call results — personal/team campaigns | Type "A" call results |
-
-> **Key rule on "log out and back in":** This is the most common fix, but it should only be suggested *after* making a change or verifying the agent's configuration — never as a reflexive first response. Overusing it without checking first loses credibility with managers.
+Six layers, strict separation of concerns. See [`architecture.md`](./architecture.md) for full detail.
 
 ---
 
 ## Key Constraints
 
-- **No API.** ReadyMode has no open API. All automation uses headless Chrome via Chrome DevTools Protocol (CDP).
-- **React SPA.** Setting `input.value` directly does not work — must use the native value setter pattern.
-- **No direct URL navigation.** Pages must be reached by clicking links within the dashboard, exactly as a human would.
-- **Dispatcher only.** The agent does not guide users. It extracts parameters and executes scripts. No conversational step-by-step instructions.
-- **tools.deny: ["browser"].** The agent cannot call the browser directly. All browser interaction is done via bash scripts.
+- **No API.** Everything goes through Playwright clicking the ReadyMode UI.
+- **React SPA.** All inputs require the native value setter + `input` event dispatch pattern.
+- **Global job lock per container.** One Playwright session at a time — concurrent ReadyMode logins on the same account kick each other out.
+- **One container = one agency.** A crash in one container does not affect any other.
+- **`READYMODE_HEADLESS=false` is production-banned.** EC2 has no display; setting it crashes the browser silently.
+- **Queue discovery needs retries.** ReadyMode's queue list renders asynchronously; the bot retries up to 6 times before aborting.
 
 ---
 
-## Documentation
+## Documentation Index
 
 | File | Contents |
-|------|----------|
-| [`operations.md`](./operations.md) | All 4 operations — detailed status, selectors, blockers, implementation notes |
-| [`architecture.md`](./architecture.md) | Execution flow, design decisions, server infra, workspace files, 3-layer memory proposal |
-| [`support-playbook.md`](./support-playbook.md) | 13 conversational support scenarios with full response flows |
-| [`incidents.md`](./incidents.md) | 10 incidents & lessons learned from Phase 1 |
-| [`security-audit.md`](./security-audit.md) | Full security audit — 27 findings, 3-phase remediation plan |
-| [`compliance-matrix.md`](./compliance-matrix.md) | R01–R33 compliance matrix (57% done, 30% TODO, 6% blocked) |
-| [`gap-analysis-roadmap.md`](./gap-analysis-roadmap.md) | G01–G13 gap inventory, prioritized roadmap, ~10–16 dev days to full closure |
+|---|---|
+| [`architecture.md`](./architecture.md) | 6-layer architecture, file structure, branch strategy, deployment |
+| [`fleet-status.md`](./fleet-status.md) | All 21 accounts — status, inventory, pending items |
+| [`operations.md`](./operations.md) | Per-operation detail, executor patterns |
+| [`engineer-onboarding.md`](./engineer-onboarding.md) | Day-1 guide for new engineers |
+| [`server-guide.md`](./server-guide.md) | EC2 + Docker + systemd setup and maintenance |
+| [`incidents.md`](./incidents.md) | All incidents and lessons learned |
+| [`gap-analysis-roadmap.md`](./gap-analysis-roadmap.md) | Open gaps and prioritized roadmap |
+| [`security-audit.md`](./security-audit.md) | Server hardening and audit findings |
