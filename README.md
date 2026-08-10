@@ -3,7 +3,7 @@
 Central documentation repository for the Nheo Automation Team.
 **This is the source of truth. Notion is no longer maintained.**
 
-## 📖 Read the docs here → [https://3b71f0c2.nheo-docs.pages.dev/](https://3b71f0c2.nheo-docs.pages.dev/)
+## 📖 Read the docs here → https://nheo-docs.pages.dev/
 
 > The repo holds the raw files. Use the link above for a better reading experience.
 
