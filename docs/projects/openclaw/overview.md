@@ -2,6 +2,7 @@
 
 **Status as of:** 2026-08-06  
 **Lead engineer:** Miguel Legarda and Juan Esteban Paez
+
 **Version:** 2.0 — Python + Playwright + Claude Haiku (replaces original OpenClaw gateway, June 2026)
 
 ---
