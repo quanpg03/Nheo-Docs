@@ -1,6 +1,6 @@
 # Incidents & Lessons Learned
 
-This document covers the technical blockers encountered and resolved during the ReadyMode Bot build. Incidents 1–10 originated in Phase 1; Incident 11 was logged during Phase 3. This is the most valuable institutional knowledge of the project — the next engineer to work on this system should read this before touching anything.
+This document covers the technical blockers encountered and resolved during the ReadyMode Bot build. Incidents 1–10 originated in Phase 1 (bash + CDP prototype); Incident 11 was logged during Phase 3 (server recovery); Incidents 12–17 were logged during the August 2026 multi-tenant operational sessions. This is the most valuable institutional knowledge of the project — the next engineer to work on this system should read this before touching anything.
 
 ---
 
@@ -11,14 +11,20 @@ This document covers the technical blockers encountered and resolved during the 
 | 1 | Agent explaining manually instead of executing | Agent behavior | `tools.deny: ["browser"]` + dispatcher rewrite |
 | 2 | Wrong login selectors | DOM inspection | Found real selectors: `#login-account`, `#login-password`, `.sign-in` |
 | 3 | React ignoring programmatic input | React SPA | Native value setter + `input` event dispatch |
-| 4 | Overlay blocking post-login clicks | DOM/UI | `dismiss_blocking_overlays()` in `_lib.sh` |
+| 4 | Overlay blocking post-login clicks | DOM/UI | `dismiss_blocking_overlays()` |
 | 5 | SPA blank DOM on direct URL | React SPA | Always navigate via `a.dash_link` clicks |
 | 6 | Server RAM exhaustion | Infrastructure | 2 GB swap + `swappiness=10` + `vfs_cache_pressure=50` |
 | 7 | Agent fabricating success | Agent behavior | `yieldMs: 120000` + explicit anti-hallucination rule |
 | 8 | Exec timeout too short | Configuration | `tools.exec.backgroundMs: 90000` |
 | 9 | Polling spam saturating gateway | Agent behavior | Min 20 s between polls, max 4 polls total |
 | 10 | Dynamic `set_pass` field not saving | DOM/form | Dispatch `input` event to trigger `oninput` handler |
-| 11 | Droplet rebuild after undocumented SSH port change (2026-05-13) | Operations / access | Restore from snapshot `OpenClow-1777504389728`; add SERVER_ACCESS_RUNBOOK.md; mandate remote-branch persistence before closing issues |
+| 11 | Droplet rebuild after undocumented SSH port change | Operations / access | Restore from snapshot; add SERVER_ACCESS_RUNBOOK.md |
+| 12 | Login form does not validate result | Executor logic | Explicit post-login DOM check before proceeding |
+| 13 | Ticket channels returning 403 | Discord permissions | Add bot as Support role in ticket panel, not server-wide |
+| 14 | Messaging bridge down 39 hours (5th outage in 3 weeks) | Infrastructure | Manage bridge as systemd service with Restart=always |
+| 15 | `sandbox not found` when renaming running container | Docker | Stop container before renaming |
+| 16 | Queue list empty due to async render (race condition) | Playwright / DOM | 6-retry loop with 500 ms waits |
+| 17 | Queue traversal stops at first populated queue + veto logic gap | Playwright / logic | Traverse all queues; veto catalog write on incomplete sweep |
 
 ---
 
@@ -71,7 +77,7 @@ input.dispatchEvent(new Event('input', { bubbles: true }));
 
 **Root cause:** A modal overlay with `id="phone_test_ui"` and `z-index: 600` was rendering on top of the dashboard after login, intercepting all click events. This overlay is intermittent, making it hard to reproduce.
 
-**Fix:** Created `dismiss_blocking_overlays()` in `_lib.sh`. This function scans for known overlay selectors after login and dismisses them before proceeding. It runs silently if no overlay is present.
+**Fix:** Created `dismiss_blocking_overlays()`. This function scans for known overlay selectors after login and dismisses them before proceeding. It runs silently if no overlay is present.
 
 **Lesson:** Post-login states in SPAs often include onboarding modals, trial banners, or notification overlays that block interaction. Always build overlay dismissal into the login flow, not as an afterthought.
 
@@ -167,3 +173,100 @@ Side effect: any work persisted only on the droplet filesystem between 2026-04-2
 1. **Access-plane changes must be documented before they ship.** Any change that affects how operators reach production — SSH port, firewall, sudo, AppArmor, key rotation, MFA — must be written into a `SERVER_ACCESS_RUNBOOK.md` checked into Nheo-Docs and announced in the operations channel before the change is applied. Long-lived SSH sessions hide configuration drift; the next disconnect is the deadline.
 2. **Closing an issue requires remote persistence.** Code, configuration, or scripts that exist only on a production filesystem are one snapshot rollback away from disappearing. Before marking a Linear issue Done, the corresponding work must be committed and pushed to a remote branch of the project's repository.
 3. **Snapshot cadence must be automatic.** Relying on manual, on-demand snapshots makes the recovery window equal to the elapsed time since the last person remembered to take one. A daily automated snapshot policy bounds the worst-case data loss to 24 hours.
+
+---
+
+## Incident 12 — Login Form Does Not Validate Result (2026-08-03)
+
+**Symptom:** During the setup of the `iul` account, the bot reported the container as connected and operational when it was not. The login flow completed without error, but the agent was not actually authenticated in ReadyMode.
+
+**Root cause:** The login executor submitted credentials and waited for the page transition to complete, but did not check whether the post-login page was the authenticated dashboard or a redirect back to the login form (which ReadyMode returns on bad credentials). Because both pages load successfully from a Playwright perspective, there was no exception to catch.
+
+**The specific trigger:** The `iul` account was initially configured with unified service account credentials that ReadyMode rejected silently — it redirected to the login page without displaying an error message.
+
+**Fix:** After the login flow completes, all executors must check for a known post-login DOM indicator (e.g. the presence of `a.dash_link` navigation elements) before proceeding. If the indicator is absent, the executor returns `{ success: false, error: "Login failed or credentials rejected" }` immediately.
+
+**Lesson:** Never assume a page transition equals a successful authentication. Verify the post-login state explicitly. ReadyMode does not always display an error on bad credentials — it may simply redirect.
+
+---
+
+## Incident 13 — Ticket Channels Returning 403 (2026-08-05)
+
+**Symptom:** Three bots (ascenti, missedinbound, iul) configured to respond in Discord ticket channels were returning 403 errors when attempting to read or post in those channels. The bots were operating correctly in non-ticket channels.
+
+**Root cause:** The Discord ticket system (likely Ticket Tool or similar) isolates ticket channels at the category level and manages access through a Support role that is granted within the ticket panel itself, not through a server-wide role. The bots had been added with a server-wide role, which the ticket system did not recognize as having access to ticket channels.
+
+**Fix:** For each brand's Discord server, the bot application was added as a Support role within the ticket panel's role configuration — not as a server-wide permission. After this change, all three bots could read and post in ticket channels correctly.
+
+**Lesson:** Discord ticket bots manage permissions outside the standard server role hierarchy. When a bot needs ticket channel access, add it within the ticket panel's own role settings, not through server-level role assignment. Verify with a test ticket after configuration.
+
+---
+
+## Incident 14 — Messaging Bridge Down 39 Hours — 5th Outage in 3 Weeks (2026-08-05)
+
+**Symptom:** The messaging bridge (which maintains the 14 active messaging sessions across the fleet) went offline and was not detected for 39 hours. This was the 5th such outage in a 3-week period.
+
+**Root cause:** The messaging bridge was running as a standalone process with no watchdog or automatic restart mechanism. When the process crashed, it stayed down until someone manually noticed the messaging sessions were missing and restarted it.
+
+**Impact:** 39 hours of messaging downtime affected all 14 accounts using the messaging system.
+
+**Fix required (not yet implemented):** Manage the messaging bridge as a systemd service with `Restart=always` and `RestartSec=10`, matching the pattern already used for the bot containers. This would limit each outage to the restart delay (10 seconds) rather than the time until someone notices.
+
+**Lesson:** Any process that needs to stay up must be managed by a process supervisor. Running it manually or with a startup script is not sufficient for production. If the bot containers can restart automatically, the messaging bridge should too.
+
+See [Gap G-NEW-01](./gap-analysis-roadmap.md) for the open item.
+
+---
+
+## Incident 15 — `sandbox not found` When Renaming a Running Container (2026-08-05)
+
+**Symptom:** When attempting to rename a Docker container while it was running (to correct a naming inconsistency), the container threw a `sandbox not found` error and became unresponsive.
+
+**Root cause:** Docker's internal networking sandbox is identified by the container name at creation time. Renaming a running container does not update the sandbox reference, leaving the container in a state where its network sandbox cannot be found.
+
+**Fix:** Stop the container before renaming it, then restart it under the new name. The sequence is: `docker stop <name>` → `docker rename <name> <new-name>` → `systemctl start readymode-<new-name>`.
+
+**Lesson:** Never rename a running Docker container. The operation appears to succeed at the Docker level but breaks the container's network stack. Always stop first.
+
+---
+
+## Incident 16 — Queue List Empty Due to Async Rendering (Race Condition) (2026-08-06)
+
+**Symptom:** The queue discovery routine was returning empty results for accounts that visibly had queues in ReadyMode. Affected accounts showed zero queue links in the catalog even though queues existed.
+
+**Root cause:** ReadyMode renders queue list items asynchronously after the page navigation completes. The executor was reading queue elements immediately after `wait_for_load_state("networkidle")`, at which point the queue DOM had not yet been injected. The read returned an empty list, which was treated as "no queues found."
+
+**Fix:** Replaced the single read with a 6-attempt retry loop with 500 ms waits between attempts:
+
+```python
+queues = []
+for _ in range(6):
+    queues = await page.query_selector_all(".queue-item")
+    if queues:
+        break
+    await asyncio.sleep(0.5)
+```
+
+If all 6 attempts return empty, the executor logs a warning and aborts the sweep for that account (rather than writing an empty catalog).
+
+**Lesson:** `wait_for_load_state("networkidle")` does not guarantee that all asynchronously rendered content is present. For dynamically injected lists, always add a retry loop with a reasonable wait. Do not treat "element not found" as "element does not exist" without retrying.
+
+---
+
+## Incident 17 — Queue Traversal Stops at First Populated Queue + Veto Logic Gap (2026-08-06)
+
+**Symptom:** Two related bugs discovered during the Aug 6 queue discovery session:
+
+1. The queue traversal loop stopped processing as soon as it found the first queue that contained at least one list. Subsequent queues were never read, producing an incomplete catalog.
+2. The veto check (which was supposed to prevent writing a catalog if the sweep was incomplete) only evaluated queues that had returned at least one name. Queues that failed silently during the sweep (returned no name) were not counted as failures, so the veto was never triggered even when the sweep was incomplete.
+
+**Root cause:** The traversal loop had an early-exit condition (`break` on first hit) that was intended to short-circuit when the target was found for a lookup operation, but was incorrectly applied to the catalog-building sweep. The veto logic had a related assumption: it iterated over queues that had names, rather than over all queues that were attempted.
+
+**Fix:**
+
+1. Removed the early-exit from the catalog sweep. The loop now runs through all discovered queues regardless of whether earlier ones had content.
+2. Rewrote the veto check to count all attempted queues, not just those that returned names. If any attempted queue fails to return a result (empty or error), the catalog write is vetoed.
+
+**Test coverage:** 357 tests before → 382 tests after, all green.
+
+**Lesson:** Sweep and lookup are different operations. A loop built for lookup (exit when found) is wrong for a sweep (must visit everything). Review loop termination conditions carefully when repurposing existing traversal code. Veto logic must be based on what was attempted, not what was found.

@@ -108,6 +108,7 @@ nav:
       - Overview: projects/openclaw/overview.md
       - Engineer Onboarding: projects/openclaw/engineer-onboarding.md
       - Server Guide: projects/openclaw/server-guide.md
+      - Fleet Status: projects/openclaw/fleet-status.md
       - Operations: projects/openclaw/operations.md
       - Architecture: projects/openclaw/architecture.md
       - Support Playbook: projects/openclaw/support-playbook.md

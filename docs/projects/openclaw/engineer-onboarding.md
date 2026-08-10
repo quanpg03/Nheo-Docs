@@ -1,293 +1,241 @@
 # Engineer Onboarding
 
-For a new engineer joining OpenClaw on day 1. Goal: ship a feature without breaking prod and without the agent hallucinating success.
+For a new engineer joining the ReadyMode Bot project on day 1. Goal: understand the system well enough to add an operation or debug a production issue without breaking anything.
 
-Read [`overview.md`](./overview.md), [`architecture.md`](./architecture.md), and [`incidents.md`](./incidents.md) first. This doc is the engineer-facing companion — fewer "why we built it", more "how do I add a thing".
+Read [`overview.md`](./overview.md), [`architecture.md`](./architecture.md), and [`incidents.md`](./incidents.md) first. This doc is the hands-on complement.
 
 ---
 
 ## 1. Mental Model in 60 Seconds
 
 ```
-Discord  →  Gateway (LLM, gpt-4.1-mini)  →  bash script  →  ReadyMode (UI clicks)
-                ^                                 |
-                |________ JSON result ____________|
+Discord message
+  → Bot (nextcord listener)
+  → Validation
+  → Intent Parser (Claude Haiku) → structured { intent, params }
+  → Dispatcher (job lock) → executor or kb.py
+  → Executor (Playwright headless Chromium) → { success, data }
+  → Responder (Claude Haiku) → natural-language Discord reply
 ```
 
-Three layers, with a strict separation of concerns:
+Six layers. Each does one thing and passes a typed result to the next.
 
-| Layer | What it does | What it does NOT do |
-|-------|--------------|----------------------|
-| Agent LLM | Parse intent, extract params, dispatch to script, parse JSON, reply in ES/EN | Touch the browser, explain UI steps, improvise selectors |
-| Bash script (`_lib.sh` + `*.sh`) | Drive Chrome via CDP: login, navigate, fill forms, submit, log out | Talk to Discord, decide intent, format user-facing prose |
-| OpenClaw runtime | Run scripts (`tools.exec`), enforce `tools.deny`, enforce `yieldMs`, route Discord ↔ agent | Anything domain-specific |
+| Layer | Does | Does NOT do |
+|---|---|---|
+| Intent Parser | Extract structured intent from natural language | Touch the browser, know ReadyMode UI |
+| Dispatcher | Route intent to the right executor | Parse language, talk to Discord |
+| Executor | Drive Playwright through ReadyMode UI | Format user-facing text, know Discord |
+| Responder | Phrase results as a human-readable Discord reply | Know selectors, know ReadyMode |
 
-If you find yourself reaching across boundaries (e.g. agent quoting selectors, or a script writing to Discord), stop — that's the wrong layer.
+If you find a CSS selector in a prompt file, or a Discord message string in an executor, that is a layer violation — move it.
 
 ---
 
-## 2. The Six Rules That Define This System
+## 2. Critical Patterns (Read Before Touching Any Executor)
 
-### Rule 1 — `tools.deny: ["browser"]` is non-negotiable
+### Pattern A — React input: native value setter
 
-Configured in `openclaw.json`:
+ReadyMode is a React SPA. Setting `element.value = x` directly bypasses React's state system. The field looks filled, the form submits empty. Always use:
 
-```json
-{
-  "tools": {
-    "deny": ["browser"],
-    "exec": { "backgroundMs": 90000 }
-  },
-  "yieldMs": 120000
-}
+```python
+await page.evaluate(
+    """([el, val]) => {
+        const setter = Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype, 'value'
+        ).set;
+        setter.call(el, val);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+    }""",
+    [element, value]
+)
 ```
 
-Why: the agent kept opening the browser tool itself and then *narrating* manual steps to managers in Discord instead of running the script. Removing the tool from its toolbox is the only fix that holds. See [Incident 1](./incidents.md).
+This pattern applies to every input in ReadyMode. The `set_pass` field additionally uses a dynamic `xname` attribute that only becomes `name` after `oninput` fires — skipping `dispatchEvent` means the field is never submitted. See [Incident 10](./incidents.md).
 
-If you ever see a PR that loosens this, it's wrong. Browser interaction belongs in scripts only.
+### Pattern B — Navigation via dash_link clicks
 
----
+ReadyMode is a React SPA. Direct URL navigation skips the React bootstrap and returns a blank DOM — no elements, no error, just nothing. Always click `a.dash_link` elements.
 
-### Rule 2 — Navigate by clicking `a.dash_link`, not by URL
-
-ReadyMode is a React SPA. Direct URL navigation (e.g. `/+Team/ManageUsers`) returns a blank DOM because the client-side state never bootstraps. You will see no error — just nothing on the page.
-
-**Pattern (used in every operation):**
-
-```javascript
-// Inside the CDP eval — find the dashboard link by text and click it
-const link = [...document.querySelectorAll('a.dash_link')]
-  .find(a => a.textContent.trim().toLowerCase() === 'users');
-if (!link) throw new Error('dash_link "Users" not found');
-link.click();
+```python
+link = await page.query_selector(f"a.dash_link >> text={section_name}")
+await link.click()
+await page.wait_for_load_state("networkidle")
 ```
 
-**Exceptions** (the small set of routes that DO work direct):
+**Known exception:** `/+Team/ManageLicenses` supports direct navigation. Document any new exceptions you find, and verify them on a cold browser before adding.
 
-| Route | Used by |
-|-------|---------|
-| `/+Team/ManageLicenses` | `clear_licenses.sh` |
+### Pattern C — Queue discovery with retry loop
 
-Default to clicking. Add a route to the exceptions table here if you discover another that survives direct nav — and only after manual verification.
+ReadyMode renders queue lists asynchronously. Reading queue elements immediately after navigation returns an empty list. This caused a production bug (see [Incident 16](./incidents.md)).
 
-> **Common pitfall:** "It works on my machine" — you logged in manually, then ran the script which went direct-URL. The DOM was warm because of your prior session. In headless, it isn't. Always test from a cold browser.
-
-See [Incident 5](./incidents.md).
-
----
-
-### Rule 3 — Native value setter for every React `<input>`
-
-Setting `input.value = 'foo'` on a React controlled component does **not** trigger React's synthetic event system. The field looks filled, the form submits empty, the user is created without a password. We hit this twice.
-
-**The pattern:**
-
-```javascript
-const setNativeValue = (el, value) => {
-  const setter = Object.getOwnPropertyDescriptor(
-    HTMLInputElement.prototype, 'value'
-  ).set;
-  setter.call(el, value);
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-};
+```python
+queues = []
+for _ in range(6):
+    queues = await page.query_selector_all(".queue-item")
+    if queues:
+        break
+    await asyncio.sleep(0.5)
 ```
 
-This lives in `_lib.sh`'s `readymode_login()` and is reused by `create_user.sh` for `u_name`, `u_account`, and `set_pass`. **Always use it for inputs.** If a textarea, swap the prototype:
+Always sweep ALL queues — do not stop at the first queue with content. Do not write the result catalog until all queues are swept; a partial sweep must be discarded. See [Incident 17](./incidents.md).
 
-```javascript
-Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-```
+### Pattern D — Post-login overlay dismissal
 
-> **Common pitfall — dynamic `xname` attributes.** ReadyMode's `set_pass` field uses `xname="set_pass"` and only promotes to `name="set_pass"` after the `oninput` handler fires. If you skip the `dispatchEvent('input')`, the field literally isn't part of the form on submit. See [Incident 10](./incidents.md).
+ReadyMode sometimes renders a modal overlay (`#phone_test_ui`, z-index 600) immediately after login, intercepting all clicks. Always dismiss it before navigating.
 
----
+### Pattern E — Login result validation
 
-### Rule 4 — Anti-hallucination: never fabricate success
-
-Two mechanical guards plus one prompt rule:
-
-| Guard | Where | Why |
-|-------|-------|-----|
-| `yieldMs: 120000` | `openclaw.json` | Give the script 2 minutes to actually finish before the LLM evaluates output |
-| `tools.exec.backgroundMs: 90000` | `openclaw.json` | Don't kill the script at 10 s (the default) |
-| Polling: min 20 s, max 4 polls | `AGENTS.md` | Stop the LLM from spamming the gateway |
-| Explicit prompt rule | `AGENTS.md` | "If the script output is ambiguous or still running, you must report that honestly. Never fabricate success." |
-
-**Script contract (every script must honor):**
-
-```bash
-# stdout: ONE single-line JSON, nothing else
-echo '{"success": true,  "message": "Licenses cleared. 7 users signed out."}'
-echo '{"success": false, "message": "Login failed: bad credentials."}'
-echo '{"success": false, "unavailable": true, "message": "Office Map empty."}'  # exit 2
-```
-
-If the script can't determine success, return `success: false` with a precise message. Do not guess. The LLM is instructed to surface that verbatim.
-
-See [Incident 7](./incidents.md) and [Incident 9](./incidents.md).
+After completing the login flow, explicitly verify that login succeeded — check for a known post-login DOM indicator (e.g. presence of `a.dash_link` elements). A wrong redirect or silent credential rejection looks identical to success from the outside. See [Incident 12](./incidents.md).
 
 ---
 
-### Rule 5 — Confirm before destructive ops
+## 3. Adding a New Operation — End to End
 
-Clear Licenses, Reset Leads, and anything that touches multiple agents must prompt the manager with **"Confirmas?"** before firing. This rule lives in `AGENTS.md` and the agent enforces it from context — but if you're adding a destructive operation, mirror the existing confirmation flow rather than skipping it. A single accidental Reset Leads is irreversible queue loss.
+### Step 1 — Inspect the DOM first
 
----
+Before writing any code:
 
-### Rule 6 — The agent does not know DOM. The scripts do not know Discord.
-
-Concrete check before merging:
-- Does your change put a CSS selector or a "click X then Y" instruction inside `AGENTS.md`, `SKILL.md`, `OPERATIONS.md`, or `KNOWLEDGE.md`? → Move it to the script.
-- Does your change put a Discord message string inside a `.sh` file? → Move it to the agent prompt.
-
-The 3-layer memory proposal in [`architecture.md`](./architecture.md) makes this physical, but the principle holds today.
-
----
-
-## 3. Adding a New Command — End to End
-
-Suppose you're adding `pause_campaign` (a new operation triggered by `"Pausa la campaña X"`). Six steps:
-
-### Step 1 — Inspect the real DOM first
-
-Before writing any script:
-1. Open ReadyMode in a normal browser, manually perform the operation, and watch DevTools.
-2. Note the **exact** dashboard link text (`a.dash_link` content) for the entry navigation.
+1. Open the target ReadyMode instance in a real browser and perform the operation manually while watching DevTools.
+2. Note the exact `a.dash_link` text used for navigation.
 3. Identify selectors for every input, button, and confirmation dialog.
-4. Check the network tab — is there a direct `POST` you could call instead of clicking? (Sometimes yes, see `upload_leads.sh`'s `fetch + FormData` to `/AI Leads/upload/index.php`.)
+4. Check if the operation can be done via a direct `fetch/POST` to an internal endpoint (direct calls are more reliable than UI clicks when available).
 
-Do not start coding selectors from documentation or screenshots alone. ReadyMode's per-tenant DOM differs.
+Do not write selectors from memory or screenshots. ReadyMode's DOM differs per tenant.
 
-### Step 2 — Write the script
+### Step 2 — Create the executor
 
-Create `pause_campaign.sh` next to the others. Skeleton:
+Create `executors/<operation_name>.py`. Follow this contract:
+
+```python
+async def run(page, params: dict) -> dict:
+    """
+    Returns:
+        { "success": True,  "data": { ... } }
+        { "success": False, "error": "human-readable message" }
+    """
+    try:
+        # login
+        # dismiss overlay
+        # navigate via dash_link
+        # fill inputs with native value setter
+        # verify final state before returning success
+        # logout
+        return {"success": True, "data": {...}}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+```
+
+Rules:
+
+- Always logout, even on failure paths where a session was opened.
+- Never return `success: true` without verifying the final state (e.g. check member count after assignment, not just that the button was clicked).
+- Executors are synchronous from the dispatcher's perspective — the job lock is held for the full duration.
+
+### Step 3 — Register the intent
+
+Add the new intent to `intent_parser_system_prompt.txt` and a matching route in `dispatcher.py`.
+
+### Step 4 — Update the responder prompt
+
+Add example output phrases for the new operation in both ES and EN to `responder_system_prompt.txt`.
+
+### Step 5 — Test with cli.py before Discord
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-source "$(dirname "$0")/_lib.sh"
-
-CAMPAIGN_NAME="${1:-}"
-[[ -z "$CAMPAIGN_NAME" ]] && {
-  echo '{"success": false, "message": "Missing campaign name."}'
-  exit 1
-}
-
-readymode_login || { echo '{"success": false, "message": "Login failed."}'; exit 1; }
-dismiss_blocking_overlays
-
-# Click into Campaigns via dash_link — never direct URL
-cdp_eval "
-  const link = [...document.querySelectorAll('a.dash_link')]
-    .find(a => a.textContent.trim().toLowerCase() === 'campaigns');
-  if (!link) throw new Error('campaigns dash_link not found');
-  link.click();
-"
-
-# ... operation-specific clicks, with native value setter for any inputs ...
-
-readymode_logout
-echo '{"success": true, "message": "Campaign paused: '"$CAMPAIGN_NAME"'."}'
+python tools/cli.py --intent create_playlist --params '{"name": "TestPlaylist", "campaigns": ["US East"]}'
 ```
 
-Rules to follow:
-- Single-line JSON to stdout. No prose, no progress logs to stdout (use stderr if needed).
-- Always `dismiss_blocking_overlays` after login.
-- Always `readymode_logout` at the end (even on failure paths where you've reached the dashboard).
-- `set -euo pipefail`. Every script. Always.
+This runs the full dispatcher → executor → responder pipeline without Discord. You pass intent and params directly, bypassing the intent parser.
 
-### Step 3 — Register the command
+### Step 6 — Test on a non-production account
 
-Add a row to the decision table in `SKILL.md` (or `OPERATIONS.md` if the 3-layer refactor has landed). Include:
-- Trigger phrases in ES and EN.
-- Required parameters.
-- Whether confirmation is required.
-- The exact `exec` command the agent should run.
-
-Example row:
-
-```
-| Pause Campaign | "pausa la campaña X" / "pause campaign X" | campaign_name | yes | exec pause_campaign.sh "$campaign_name" |
-```
-
-### Step 4 — Update behavioral rules if needed
-
-If the operation introduces a new pattern (e.g. multi-step confirmation, special error handling), add the minimum rule to `AGENTS.md`. Keep it under 5 lines. Do not paste DOM details there.
-
-### Step 5 — Test against a non-prod tenant
-
-See section 4 below. **Do not test against `arpagrowth.readymode.com` directly.** A misfire pauses real campaigns for a paying client.
-
-### Step 6 — Ship behind manual confirmation on first deploy
-
-For the first week of a new operation, hard-require `"Confirmas?"` even if the operation isn't destructive. It catches false-positive intent matches before they cost anything.
+See section 4. Never test against a live client account.
 
 ---
 
-## 4. Local Dev — Testing Without Hitting Production
+## 4. Local Dev and Testing
 
-The bot runs against `arpagrowth.readymode.com`. **Do not test new scripts against that URL.** Options, in order of preference:
+### Using cli.py
 
-### Option A — Dedicated ReadyMode sandbox tenant (preferred)
+`tools/cli.py` runs the pipeline without Discord. Use it for all initial executor development.
 
-If/when [G12](./gap-analysis-roadmap.md) (dedicated bot account) lands and a sandbox tenant exists, point `READYMODE_URL` at it via env var. The credentials live in SOPS (see `docs/projects/openclaw/secrets/`).
+### Testing against a non-production account
 
-### Option B — Mock the CDP layer
+Set `READYMODE_URL`, `READYMODE_USERNAME`, and `READYMODE_PASSWORD` in your `.env` to point at a dedicated test ReadyMode account. Never test against a live client instance — a misfire creates real accounts, resets real leads, or clears real licenses.
 
-For pure logic changes (parameter parsing, JSON shape, confirmation flow), the script's CDP calls can be stubbed:
+### READYMODE_HEADLESS
 
-```bash
-# In a test script
-export OPENCLAW_DRY_RUN=1
-./pause_campaign.sh "TestCampaign"
-# The _lib.sh wrappers should short-circuit when this is set, returning canned DOM responses.
-```
+Keep it `true` even locally. If you set it to `false` to watch the browser, re-test headless before committing — some timing issues only appear in headless mode.
 
-If `_lib.sh` doesn't yet honor `OPENCLAW_DRY_RUN`, add the support — it's a small, low-risk change and pays back the first time you need to debug locally without a tenant.
+### Container isolation
 
-### Option C — Run against a captured ReadyMode HTML snapshot
-
-For DOM-only experiments (selector hunting, native value setter behavior), save the post-login dashboard HTML, serve it locally with `python -m http.server`, and point Chrome at `http://localhost:8000`. Form submits won't work but selectors and React patterns will.
-
-### Hard rules — never do these in dev
-
-| Don't | Why |
-|-------|-----|
-| Run new scripts against `arpagrowth.readymode.com` | Real campaigns, real agents, real consequences |
-| Reuse the production manager Discord account for testing | Bot/human session collision; logging in kicks the bot offline |
-| `ssh miguel@159.89.179.179` and edit scripts in place | Production. Edit in the repo, deploy via the normal flow |
-| Reboot or restart `openclaw-*.service` without explicit user approval | The bot is live for Arpa Growth |
-
-The ReadyMode session collision (bot and manager share the `manager` account) is a known problem — see [G22 / NHE-56](./gap-analysis-roadmap.md). Until a dedicated bot account exists, any human login kicks the bot. Plan around it.
+Spin up a test Docker Compose instance with a test `.env` in a separate directory. Do not share the Docker network with production containers.
 
 ---
 
-## 5. Common Pitfalls
+## 5. Deploying a New Agency
 
-A grab-bag of things that have actually happened.
+```bash
+# 1. Create the agency branch
+git checkout main && git pull
+git checkout -b agency/<name>
+
+# 2. Create .env for the agency
+cat > .env << EOF
+READYMODE_URL=https://<name>.readymode.com
+READYMODE_USERNAME=...
+READYMODE_PASSWORD=...
+DISCORD_TOKEN=...
+ANTHROPIC_API_KEY=...
+ALLOWED_CHANNEL_IDS=...
+READYMODE_HEADLESS=true
+EOF
+
+git add .env && git commit -m "init agency/<name>"
+git push -u origin agency/<name>
+
+# 3. Set up on EC2
+mkdir -p /opt/readymode-bots/<name>
+cd /opt/readymode-bots/<name>
+git clone --branch agency/<name> <repo-url> .
+
+# 4. Register systemd unit
+cp deploy/readymode-bot.service /etc/systemd/system/readymode-<name>.service
+# Edit WorkingDirectory and Description in the unit file
+systemctl daemon-reload
+systemctl enable readymode-<name>
+systemctl start readymode-<name>
+
+# 5. Verify
+docker ps --filter "name=deploy-bot-<name>"
+journalctl -u readymode-<name> -f
+```
+
+**Ticket channel access:** If the agency uses Discord tickets, add the bot application as a Support role within each brand's ticket panel settings — not as a server-wide role. Adding the role server-wide causes 403 errors when the bot tries to read ticket channels. See [Incident 13](./incidents.md).
+
+---
+
+## 6. Common Pitfalls
 
 | Pitfall | Symptom | Fix |
-|---------|---------|-----|
-| Direct URL nav for "just this one route" | Blank DOM, script hangs at next selector | Click `a.dash_link` instead; document the exception if it really does work |
-| `input.value = 'x'` | Field looks filled, form submits empty, no error | Native value setter + `dispatchEvent('input')` |
-| Returning `{"success": true}` because you "saw the click happen" | Agent reports done, but ReadyMode rejected the submit | Verify final state (e.g. row count, member count) and report that |
-| Forgetting `dismiss_blocking_overlays` after login | Subsequent clicks silently swallowed by `#phone_test_ui` modal (z-index 600) | Always call it post-login, even if you didn't see the overlay locally |
-| Multi-line script output | LLM can't parse JSON, fabricates a guess | Single-line JSON to stdout, everything else to stderr |
-| Polling the gateway in tight loop | Gateway becomes unresponsive | 20 s min between polls, 4 polls max |
-| Writing tests against prod | One typo, real damage | See section 4 |
+|---|---|---|
+| `input.value = x` instead of native setter | Field appears filled, form submits empty | Pattern A: native value setter |
+| Direct URL navigation | Blank DOM, selector not found | Pattern B: click `a.dash_link` |
+| Reading queue list without retry | Empty list even though queues exist in ReadyMode | Pattern C: 6-retry loop |
+| Stopping at the first populated queue | Misses other queues, incomplete catalog | Always traverse ALL queues |
+| Not verifying login result | Silent failure, all subsequent clicks 404 | Pattern E: check post-login DOM indicator |
+| Renaming a running container | `sandbox not found` error | Stop → rename → restart |
+| `READYMODE_HEADLESS=false` on EC2 | Browser crashes silently | EC2 has no display; keep headless |
+| Adding bot as server-wide role for tickets | 403 on ticket channel read | Add bot to ticket panel as Support role specifically |
 
 ---
 
-## 6. What to Read Next
+## 7. What to Read Next
 
-In order:
-
-1. [`overview.md`](./overview.md) — Client context and the 4 operations.
-2. [`architecture.md`](./architecture.md) — The decisions D1–D6 and why.
-3. [`incidents.md`](./incidents.md) — All 10 lessons learned. Read every one before touching anything.
-4. [`operations.md`](./operations.md) — Per-operation status and selector specifics.
-5. [`support-playbook.md`](./support-playbook.md) — Conversational scenarios.
-6. [`gap-analysis-roadmap.md`](./gap-analysis-roadmap.md) — What's still TODO and why.
-7. [`security-audit.md`](./security-audit.md) — Server posture and what NOT to touch.
-
-If you read those and still have questions, the answer probably belongs in this doc — open a PR.
+1. [`overview.md`](./overview.md) — System purpose and fleet status.
+2. [`architecture.md`](./architecture.md) — Full 6-layer detail, branch strategy, Docker deployment.
+3. [`incidents.md`](./incidents.md) — Read all incidents before touching any executor.
+4. [`operations.md`](./operations.md) — Per-operation detail.
+5. [`fleet-status.md`](./fleet-status.md) — Current account inventory and known issues.
+6. [`gap-analysis-roadmap.md`](./gap-analysis-roadmap.md) — What's still open and why.
+7. [`security-audit.md`](./security-audit.md) — Server posture and what not to touch.
